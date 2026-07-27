@@ -83,6 +83,7 @@ static uint64_t s_transport_frame;
 static volatile bool s_overdubbing;
 static volatile uint32_t s_overdub_frames;
 static volatile uint8_t s_track_volume[4] = {100, 100, 100, 100};
+static volatile uint8_t s_monitor_volume = 55;
 static int64_t s_last_tap_us;
 static uint32_t s_tap_intervals[3];
 static uint8_t s_tap_count;
@@ -271,6 +272,15 @@ void uar_loop_get_track_volumes(uint8_t volumes[4]) {
     taskENTER_CRITICAL(&s_lock);
     memcpy(volumes, (const void *)s_track_volume, sizeof(s_track_volume));
     taskEXIT_CRITICAL(&s_lock);
+}
+
+void uar_monitor_adjust_volume(int delta) {
+    int volume = (int)s_monitor_volume + delta;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    if (bsp_audio_set_volume((float)volume) == ESP_OK) {
+        s_monitor_volume = (uint8_t)volume;
+    }
 }
 
 void uar_loop_tap_tempo(void) {

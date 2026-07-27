@@ -138,7 +138,7 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
     }
 
     text(30, s_height - 27, 14, COLOR_DIM,
-        "↑↓ BPM  ←→ BARS  1-4 TRACK  VOL ±  F2 REC/OD  T TAP  M METRO  F1 EXIT");
+        "↑↓ TRACK VOL  B+↑↓ BPM  ←→ BARS  1-4 TRACK  F2 REC/OD  T TAP  M METRO");
     bsp_display_blit(0, 0, s_width, s_height, pax_buf_get_pixels(&s_framebuffer));
 }
 
@@ -219,12 +219,20 @@ void app_main(void) {
                     case BSP_INPUT_NAVIGATION_KEY_F5:
                         uar_loop_select_next_track();
                         break;
-                    case BSP_INPUT_NAVIGATION_KEY_UP:
-                        uar_loop_adjust_bpm(1);
+                    case BSP_INPUT_NAVIGATION_KEY_UP: {
+                        bool bpm_modifier = false;
+                        bsp_input_read_scancode(BSP_INPUT_SCANCODE_B, &bpm_modifier);
+                        if (bpm_modifier) uar_loop_adjust_bpm(1);
+                        else uar_loop_adjust_track_volume(5);
                         break;
-                    case BSP_INPUT_NAVIGATION_KEY_DOWN:
-                        uar_loop_adjust_bpm(-1);
+                    }
+                    case BSP_INPUT_NAVIGATION_KEY_DOWN: {
+                        bool bpm_modifier = false;
+                        bsp_input_read_scancode(BSP_INPUT_SCANCODE_B, &bpm_modifier);
+                        if (bpm_modifier) uar_loop_adjust_bpm(-1);
+                        else uar_loop_adjust_track_volume(-5);
                         break;
+                    }
                     case BSP_INPUT_NAVIGATION_KEY_LEFT:
                         uar_loop_adjust_bars(-1);
                         break;
@@ -232,10 +240,10 @@ void app_main(void) {
                         uar_loop_adjust_bars(1);
                         break;
                     case BSP_INPUT_NAVIGATION_KEY_VOLUME_UP:
-                        uar_loop_adjust_track_volume(5);
+                        uar_monitor_adjust_volume(5);
                         break;
                     case BSP_INPUT_NAVIGATION_KEY_VOLUME_DOWN:
-                        uar_loop_adjust_track_volume(-5);
+                        uar_monitor_adjust_volume(-5);
                         break;
                     default:
                         break;

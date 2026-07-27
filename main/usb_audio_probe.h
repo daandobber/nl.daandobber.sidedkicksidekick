@@ -67,3 +67,4 @@ bool uar_loop_is_overdubbing(void);
 void uar_loop_tap_tempo(void);
 void uar_loop_adjust_track_volume(int delta);
 void uar_loop_get_track_volumes(uint8_t volumes[4]);
+void uar_monitor_adjust_volume(int delta);
