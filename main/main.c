@@ -31,6 +31,8 @@ static const char *TAG = "usb_recorder";
 static pax_buf_t s_framebuffer;
 static size_t s_width;
 static size_t s_height;
+static size_t s_physical_width;
+static size_t s_physical_height;
 static QueueHandle_t s_input_queue;
 static uint16_t s_display_levels[8];
 static uint16_t s_peak_hold[8];
@@ -172,17 +174,20 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
     text(34, s_height - 23, 12, COLOR_TEXT, "/ OVERDUB");
     text(132, s_height - 38, 13, COLOR_TEXT,
         "↑↓ LOOP VOL   B+↑↓ BPM   ←→ BARS   1-4 TRACK   T TAP   M METRO   F1 EXIT");
-    bsp_display_blit(0, 0, s_width, s_height, pax_buf_get_pixels(&s_framebuffer));
+    bsp_display_blit(0, 0, s_physical_width, s_physical_height,
+                     pax_buf_get_pixels(&s_framebuffer));
 }
 
 static void graphics_initialize(void) {
     bsp_display_color_format_t format;
     bsp_display_endianness_t endianness;
-    ESP_ERROR_CHECK(bsp_display_get_parameters(&s_width, &s_height, &format, &endianness));
+    ESP_ERROR_CHECK(bsp_display_get_parameters(
+        &s_physical_width, &s_physical_height, &format, &endianness
+    ));
     pax_buf_type_t type = PAX_BUF_24_888RGB;
     if (format == BSP_DISPLAY_COLOR_FORMAT_16_565RGB) type = PAX_BUF_16_565RGB;
     if (format == BSP_DISPLAY_COLOR_FORMAT_32_8888ARGB) type = PAX_BUF_32_8888ARGB;
-    pax_buf_init(&s_framebuffer, NULL, s_width, s_height, type);
+    pax_buf_init(&s_framebuffer, NULL, s_physical_width, s_physical_height, type);
     pax_buf_reversed(&s_framebuffer, endianness == BSP_DISPLAY_ENDIAN_BIG);
     pax_orientation_t orientation = PAX_O_UPRIGHT;
     switch (bsp_display_get_default_rotation()) {
@@ -192,6 +197,11 @@ static void graphics_initialize(void) {
         default: break;
     }
     pax_buf_set_orientation(&s_framebuffer, orientation);
+    s_width = pax_buf_get_width(&s_framebuffer);
+    s_height = pax_buf_get_height(&s_framebuffer);
+    ESP_LOGI(TAG, "Display: physical %ux%u, logical %ux%u",
+             (unsigned)s_physical_width, (unsigned)s_physical_height,
+             (unsigned)s_width, (unsigned)s_height);
 }
 
 void app_main(void) {
