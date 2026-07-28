@@ -66,6 +66,7 @@ static int16_t s_previous_track_cursor[2][4] = {
 };
 static uint16_t s_large_waveform_cache[2][UAR_WAVEFORM_BINS];
 static uint8_t s_large_waveform_track[2] = {0xff, 0xff};
+static uint16_t s_previous_beat[2] = {UINT16_MAX, UINT16_MAX};
 
 static void text(float x, float y, float size, pax_col_t color, const char *value) {
     pax_draw_text(&s_framebuffer, color, pax_font_sky_mono, size, x, y, value);
@@ -93,8 +94,8 @@ static void render_transport_fast(void) {
     unsigned displayed = s_framebuffer_index ^ 1;
     int16_t cursor = (int16_t)(timeline_x + timeline_w * progress);
     if (s_previous_main_cursor[displayed] >= 0) {
-        pax_draw_rect(target, 0xff343535, s_previous_main_cursor[displayed],
-                      timeline_y, 3, 24);
+        pax_draw_rect(target, 0xff343535, s_previous_main_cursor[displayed] - 3,
+                      timeline_y, 10, 24);
     }
     bool track_changed = s_large_waveform_track[displayed] != s_selected_track;
     int16_t previous_cursor = s_previous_main_cursor[displayed];
@@ -102,8 +103,8 @@ static void render_transport_fast(void) {
         float bin_x = timeline_x + timeline_w * bin / UAR_WAVEFORM_BINS;
         float next_x = timeline_x + timeline_w * (bin + 1) / UAR_WAVEFORM_BINS;
         bool cursor_erased_here =
-            previous_cursor >= (int16_t)bin_x - 3 &&
-            previous_cursor < (int16_t)next_x + 1;
+            previous_cursor >= (int16_t)bin_x - 7 &&
+            previous_cursor < (int16_t)next_x + 4;
         uint16_t amplitude_value = s_track_waveforms[s_selected_track][bin];
         if (track_changed || cursor_erased_here ||
             s_large_waveform_cache[displayed][bin] != amplitude_value) {
@@ -118,12 +119,29 @@ static void render_transport_fast(void) {
         }
     }
     s_large_waveform_track[displayed] = s_selected_track;
-    for (uint8_t bar = 1; bar < s_loop_bars; bar++) {
-        float x = timeline_x + timeline_w * ((float)bar / s_loop_bars);
-        pax_draw_rect(target, COLOR_TEXT, x, timeline_y, 2, 24);
+    uint16_t total_beats = (uint16_t)s_loop_bars * 4;
+    for (uint16_t beat = 1; beat < total_beats; beat++) {
+        float x = timeline_x + timeline_w * ((float)beat / total_beats);
+        bool bar_line = (beat % 4) == 0;
+        pax_draw_rect(target, bar_line ? COLOR_TEXT : COLOR_DIM, x,
+                      timeline_y + (bar_line ? 0 : 16),
+                      bar_line ? 2 : 1, bar_line ? 24 : 8);
     }
-    pax_draw_rect(target, transport_color, cursor, timeline_y, 3, 24);
+    pax_draw_rect(target, transport_color, cursor, timeline_y, 4, 24);
+    pax_draw_rect(target, transport_color, cursor - 3, timeline_y, 10, 4);
     s_previous_main_cursor[displayed] = cursor;
+    uint16_t current_beat = total_beats > 0 ?
+        (uint16_t)(progress * total_beats) : 0;
+    if (current_beat >= total_beats && total_beats > 0) current_beat = total_beats - 1;
+    if (s_previous_beat[displayed] != current_beat) {
+        char position[32];
+        snprintf(position, sizeof(position), "BAR %02u   BEAT %u/4",
+                 current_beat / 4 + 1, current_beat % 4 + 1);
+        pax_draw_rect(target, COLOR_PANEL, 36, 246, 210, 27);
+        pax_draw_text(target, COLOR_TEXT, pax_font_sky_mono, 16,
+                      40, 251, position);
+        s_previous_beat[displayed] = current_beat;
+    }
 
     for (uint8_t track = 0; track < 4; track++) {
         float x = 34 + track * 187;
@@ -225,18 +243,25 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         }
         pax_draw_rect(&s_framebuffer, transport_color,
                       timeline_x + timeline_w * progress, timeline_y, 3, 24);
-        for (uint8_t bar = 1; bar < s_loop_bars; bar++) {
-            float x = timeline_x + timeline_w * ((float)bar / s_loop_bars);
-            pax_draw_rect(&s_framebuffer, COLOR_TEXT, x, timeline_y, 2, 24);
+        uint16_t total_beats = (uint16_t)s_loop_bars * 4;
+        for (uint16_t beat = 1; beat < total_beats; beat++) {
+            float x = timeline_x + timeline_w * ((float)beat / total_beats);
+            bool bar_line = (beat % 4) == 0;
+            pax_draw_rect(&s_framebuffer, bar_line ? COLOR_TEXT : COLOR_DIM, x,
+                          timeline_y + (bar_line ? 0 : 16),
+                          bar_line ? 2 : 1, bar_line ? 24 : 8);
         }
         memcpy(s_large_waveform_cache[s_framebuffer_index],
                s_track_waveforms[s_selected_track],
                sizeof(s_large_waveform_cache[s_framebuffer_index]));
         s_large_waveform_track[s_framebuffer_index] = s_selected_track;
-        snprintf(line, sizeof(line), "BAR %u / %u",
-                 s_loop_frames ? (unsigned)(progress * s_loop_bars) + 1 : 0,
-                 s_loop_bars);
-        text(40, 251, 14, COLOR_TEXT, line);
+        uint16_t current_beat = total_beats > 0 ?
+            (uint16_t)(progress * total_beats) : 0;
+        if (current_beat >= total_beats && total_beats > 0) current_beat = total_beats - 1;
+        snprintf(line, sizeof(line), "BAR %02u   BEAT %u/4",
+                 current_beat / 4 + 1, current_beat % 4 + 1);
+        text(40, 251, 16, COLOR_TEXT, line);
+        s_previous_beat[s_framebuffer_index] = current_beat;
         snprintf(line, sizeof(line), "METRO %s", s_metronome ? "ON" : "OFF");
         text(164, 251, 14, s_metronome ? COLOR_ACCENT : COLOR_DIM, line);
 
