@@ -10,6 +10,7 @@
 #include "esp_err.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -57,12 +58,15 @@ static bool s_metronome;
 static bool s_overdubbing;
 static bool s_record_armed;
 static uint8_t s_track_volumes[4] = {100, 100, 100, 100};
+static uint32_t s_ui_draw_ms;
+static uint32_t s_ui_present_ms;
 
 static void text(float x, float y, float size, pax_col_t color, const char *value) {
     pax_draw_text(&s_framebuffer, color, pax_font_sky_mono, size, x, y, value);
 }
 
 static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
+    int64_t draw_started = esp_timer_get_time();
     pax_background(&s_framebuffer, COLOR_BG);
     pax_draw_rect(&s_framebuffer, COLOR_SHADOW, 0, 0, s_width, 5);
     pax_draw_rect(&s_framebuffer, COLOR_SILVER, 0, 5, s_width, 86);
@@ -82,6 +86,10 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
     pax_draw_circle(&s_framebuffer, COLOR_SHADOW, s_width - 10, 78, 6);
     text(s_width - 180, 51, 14, probe->connected ? COLOR_ACCENT : COLOR_DIM,
          probe->connected ? "● EP-136 LIVE" : "○ NO DEVICE");
+    char performance[32];
+    snprintf(performance, sizeof(performance), "UI %lu+%lu ms",
+             (unsigned long)s_ui_draw_ms, (unsigned long)s_ui_present_ms);
+    text(s_width - 178, 70, 11, COLOR_DIM, performance);
 
     if (!probe->connected) {
         pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 105, s_width - 40, 250, 5);
@@ -131,29 +139,32 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         text(164, 251, 14, s_metronome ? COLOR_ACCENT : COLOR_DIM, line);
 
         for (uint8_t track = 0; track < 4; track++) {
-            float x = 92 + track * 132;
-            float y = 333;
+            float x = 34 + track * 145;
+            float y = 296;
+            float width = 128;
+            float height = 98;
             pax_col_t color = track == s_selected_track ? COLOR_ACCENT :
                               s_track_frames[track] ? COLOR_DARK : COLOR_SHADOW;
-            pax_draw_circle(&s_framebuffer, COLOR_SHADOW, x + 3, y + 4, 38);
-            pax_draw_circle(&s_framebuffer, COLOR_DARK, x, y, 37);
-            pax_draw_circle(&s_framebuffer, 0xff4a4a49, x, y, 29);
-            for (uint8_t ring = 0; ring < (track == s_selected_track ? 4 : 2); ring++) {
-                pax_draw_circle(&s_framebuffer, color, x, y, 37 + ring);
-            }
+            pax_draw_rect(&s_framebuffer, COLOR_SHADOW, x + 3, y + 4, width, height);
+            pax_draw_rect(&s_framebuffer, COLOR_DARK, x, y, width, height);
+            pax_draw_rect(&s_framebuffer, color, x, y, width, 5);
+            pax_draw_rect(&s_framebuffer, 0xff3b3c3c, x + 10, y + 47, width - 20, 18);
             if (s_track_frames[track] > 0) {
                 float phase = (float)s_track_positions[track] / s_track_frames[track];
-                for (uint8_t ring = 0; ring < 4; ring++) {
-                    pax_draw_arc(&s_framebuffer, COLOR_ACCENT, x, y, 31 + ring,
-                                 -1.5708f, -1.5708f + phase * 6.28318f);
+                pax_draw_rect(&s_framebuffer, COLOR_ACCENT, x + 10, y + 47,
+                              (width - 20) * phase, 18);
+                for (uint8_t division = 1; division < 4; division++) {
+                    pax_draw_rect(&s_framebuffer, COLOR_TEXT,
+                                  x + 10 + (width - 20) * division / 4,
+                                  y + 47, 1, 18);
                 }
             }
             snprintf(line, sizeof(line), "%u", track + 1);
-            text(x - 6, y - 10, 21, COLOR_TEXT, line);
-            text(x - 25, y - 62, 13, color,
+            text(x + 11, y + 12, 25, COLOR_TEXT, line);
+            text(x + 43, y + 18, 12, color,
                  track == s_selected_track ? "SELECT" : "LOOP");
             snprintf(line, sizeof(line), "%u%%", s_track_volumes[track]);
-            text(x - 18, y + 47, 13, COLOR_DARK, line);
+            text(x + 10, y + 72, 13, COLOR_TEXT, line);
         }
 
         static const char *const input_names[] = {"1L", "1R", "2L", "2R", "AL", "AR"};
@@ -185,8 +196,11 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
     text(34, s_height - 23, 12, COLOR_TEXT, "/ OVERDUB");
     text(132, s_height - 38, 13, COLOR_TEXT,
         "↑↓ LOOP VOL   B+↑↓ BPM   ←→ BARS   1-4 TRACK   T TAP   M METRO   F1 EXIT");
+    s_ui_draw_ms = (uint32_t)((esp_timer_get_time() - draw_started + 500) / 1000);
+    int64_t present_started = esp_timer_get_time();
     bsp_display_blit(0, 0, s_physical_width, s_physical_height,
                      pax_buf_get_pixels(&s_framebuffer));
+    s_ui_present_ms = (uint32_t)((esp_timer_get_time() - present_started + 500) / 1000);
     s_framebuffer_index ^= 1;
     s_framebuffer = s_framebuffers[s_framebuffer_index];
 }
