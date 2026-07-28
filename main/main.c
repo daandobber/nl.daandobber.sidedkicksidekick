@@ -57,8 +57,13 @@ static bool s_metronome;
 static bool s_overdubbing;
 static bool s_record_armed;
 static uint8_t s_track_volumes[4] = {100, 100, 100, 100};
+static uint16_t s_track_waveforms[4][UAR_WAVEFORM_BINS];
 static uint32_t s_ui_draw_ms;
 static uint32_t s_ui_present_ms;
+static int16_t s_previous_main_cursor[2] = {-1, -1};
+static int16_t s_previous_track_cursor[2][4] = {
+    {-1, -1, -1, -1}, {-1, -1, -1, -1}
+};
 
 static void text(float x, float y, float size, pax_col_t color, const char *value) {
     pax_draw_text(&s_framebuffer, color, pax_font_sky_mono, size, x, y, value);
@@ -83,13 +88,18 @@ static void render_transport_fast(void) {
     pax_col_t transport_color = s_loop_state == UAR_LOOP_RECORDING ? COLOR_BAD :
                                 s_loop_state == UAR_LOOP_PLAYING ? COLOR_GOOD :
                                 COLOR_ACCENT;
-    pax_draw_rect(target, 0xff343535, timeline_x, timeline_y, timeline_w, 24);
-    pax_draw_rect(target, transport_color, timeline_x, timeline_y,
-                  timeline_w * progress, 24);
+    unsigned displayed = s_framebuffer_index ^ 1;
+    int16_t cursor = (int16_t)(timeline_x + timeline_w * progress);
+    if (s_previous_main_cursor[displayed] >= 0) {
+        pax_draw_rect(target, 0xff343535, s_previous_main_cursor[displayed],
+                      timeline_y, 3, 24);
+    }
     for (uint8_t bar = 1; bar < s_loop_bars; bar++) {
         float x = timeline_x + timeline_w * ((float)bar / s_loop_bars);
         pax_draw_rect(target, COLOR_TEXT, x, timeline_y, 2, 24);
     }
+    pax_draw_rect(target, transport_color, cursor, timeline_y, 3, 24);
+    s_previous_main_cursor[displayed] = cursor;
 
     for (uint8_t track = 0; track < 4; track++) {
         float x = 34 + track * 187;
@@ -97,14 +107,24 @@ static void render_transport_fast(void) {
         float bar_x = x + 10;
         float bar_y = 343;
         float bar_w = width - 20;
-        pax_draw_rect(target, 0xff3b3c3c, bar_x, bar_y, bar_w, 18);
+        int16_t previous = s_previous_track_cursor[displayed][track];
+        if (previous >= 0) {
+            for (uint8_t dx = 0; dx < 2; dx++) {
+                uint16_t bin = (uint16_t)(previous + dx - bar_x);
+                pax_draw_rect(target, 0xff3b3c3c, previous + dx, bar_y, 1, 18);
+                if (bin < UAR_WAVEFORM_BINS) {
+                    float amplitude =
+                        8.0f * s_track_waveforms[track][bin] / 32767.0f;
+                    pax_draw_rect(target, COLOR_GOOD, previous + dx,
+                                  bar_y + 9 - amplitude, 1, amplitude * 2 + 1);
+                }
+            }
+        }
         if (s_track_frames[track] > 0) {
             float phase = (float)s_track_positions[track] / s_track_frames[track];
-            pax_draw_rect(target, COLOR_ACCENT, bar_x, bar_y, bar_w * phase, 18);
-            for (uint8_t division = 1; division < 4; division++) {
-                pax_draw_rect(target, COLOR_TEXT, bar_x + bar_w * division / 4,
-                              bar_y, 1, 18);
-            }
+            int16_t track_cursor = (int16_t)(bar_x + (bar_w - 1) * phase);
+            pax_draw_rect(target, COLOR_ACCENT, track_cursor, bar_y, 2, 18);
+            s_previous_track_cursor[displayed][track] = track_cursor;
         }
     }
 }
@@ -169,8 +189,8 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         const float timeline_y = 218;
         const float timeline_w = (float)s_width - 80;
         pax_draw_rect(&s_framebuffer, 0xff343535, timeline_x, timeline_y, timeline_w, 24);
-        pax_draw_rect(&s_framebuffer, transport_color, timeline_x, timeline_y,
-                      timeline_w * progress, 24);
+        pax_draw_rect(&s_framebuffer, transport_color,
+                      timeline_x + timeline_w * progress, timeline_y, 3, 24);
         for (uint8_t bar = 1; bar < s_loop_bars; bar++) {
             float x = timeline_x + timeline_w * ((float)bar / s_loop_bars);
             pax_draw_rect(&s_framebuffer, COLOR_TEXT, x, timeline_y, 2, 24);
@@ -195,13 +215,14 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
             pax_draw_rect(&s_framebuffer, 0xff3b3c3c, x + 10, y + 47, width - 20, 18);
             if (s_track_frames[track] > 0) {
                 float phase = (float)s_track_positions[track] / s_track_frames[track];
-                pax_draw_rect(&s_framebuffer, COLOR_ACCENT, x + 10, y + 47,
-                              (width - 20) * phase, 18);
-                for (uint8_t division = 1; division < 4; division++) {
-                    pax_draw_rect(&s_framebuffer, COLOR_TEXT,
-                                  x + 10 + (width - 20) * division / 4,
-                                  y + 47, 1, 18);
+                for (uint16_t bin = 0; bin < UAR_WAVEFORM_BINS; bin++) {
+                    float amplitude =
+                        8.0f * s_track_waveforms[track][bin] / 32767.0f;
+                    pax_draw_rect(&s_framebuffer, COLOR_GOOD, x + 10 + bin,
+                                  y + 56 - amplitude, 1, amplitude * 2 + 1);
                 }
+                pax_draw_rect(&s_framebuffer, COLOR_ACCENT,
+                              x + 10 + (width - 21) * phase, y + 47, 2, 18);
             }
             snprintf(line, sizeof(line), "%u", track + 1);
             text(x + 11, y + 12, 25, COLOR_TEXT, line);
@@ -392,7 +413,9 @@ void app_main(void) {
         bool overdubbing = uar_loop_is_overdubbing();
         bool record_armed = uar_loop_is_record_armed();
         uint8_t track_volumes[4];
+        uint16_t track_waveforms[4][UAR_WAVEFORM_BINS];
         uar_loop_get_track_volumes(track_volumes);
+        uar_loop_get_waveforms(track_waveforms);
         uar_loop_get_state(&loop_state, &loop_frames, &loop_position);
         uar_loop_get_settings(&loop_bpm, &loop_bars);
         uar_loop_get_tracks(&selected_track, track_frames, track_positions, &metronome);
@@ -419,6 +442,7 @@ void app_main(void) {
         s_overdubbing = overdubbing;
         s_record_armed = record_armed;
         memcpy(s_track_volumes, track_volumes, sizeof(s_track_volumes));
+        memcpy(s_track_waveforms, track_waveforms, sizeof(s_track_waveforms));
         memcpy(s_track_frames, track_frames, sizeof(s_track_frames));
         memcpy(s_track_positions, track_positions, sizeof(s_track_positions));
         s_metronome = metronome;

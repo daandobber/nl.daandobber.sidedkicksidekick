@@ -85,6 +85,7 @@ static volatile bool s_record_armed;
 static volatile bool s_pending_overdub;
 static volatile uint32_t s_overdub_frames;
 static volatile uint8_t s_track_volume[4] = {100, 100, 100, 100};
+static uint16_t s_track_waveform[4][UAR_WAVEFORM_BINS];
 static volatile uint8_t s_monitor_volume = 55;
 static int64_t s_last_tap_us;
 static uint32_t s_tap_intervals[3];
@@ -235,6 +236,8 @@ void uar_loop_clear(void) {
     s_pending_overdub = false;
     s_track_frames[s_selected_track] = 0;
     s_track_position[s_selected_track] = 0;
+    memset(s_track_waveform[s_selected_track], 0,
+           sizeof(s_track_waveform[s_selected_track]));
     bool any = false;
     for (uint8_t i = 0; i < 4; i++) any |= s_track_frames[i] > 0;
     s_loop_state = any ? UAR_LOOP_PLAYING : UAR_LOOP_EMPTY;
@@ -275,6 +278,13 @@ void uar_loop_get_track_volumes(uint8_t volumes[4]) {
     if (volumes == NULL) return;
     taskENTER_CRITICAL(&s_lock);
     memcpy(volumes, (const void *)s_track_volume, sizeof(s_track_volume));
+    taskEXIT_CRITICAL(&s_lock);
+}
+
+void uar_loop_get_waveforms(uint16_t waveforms[4][UAR_WAVEFORM_BINS]) {
+    if (waveforms == NULL) return;
+    taskENTER_CRITICAL(&s_lock);
+    memcpy(waveforms, s_track_waveform, sizeof(s_track_waveform));
     taskEXIT_CRITICAL(&s_lock);
 }
 
@@ -988,6 +998,8 @@ static void monitor_task(void *argument) {
                 if (!s_overdubbing) {
                     s_track_frames[s_selected_track] = 0;
                     s_track_position[s_selected_track] = 0;
+                    memset(s_track_waveform[s_selected_track], 0,
+                           sizeof(s_track_waveform[s_selected_track]));
                 }
                 s_record_armed = false;
                 s_loop_state = UAR_LOOP_RECORDING;
@@ -1003,10 +1015,19 @@ static void monitor_task(void *argument) {
                 for (uint16_t frame = 0; frame < input_frames; frame++) {
                     uint32_t position = (s_track_position[track] + record_offset + frame) %
                                         s_track_frames[track];
+                    uint32_t peak = 0;
                     for (uint8_t channel = 0; channel < 2; channel++) {
                         int32_t mixed = s_track_samples[track][position * 2 + channel] / 2 +
                                         block.samples[(record_offset + frame) * 2 + channel] / 2;
                         s_track_samples[track][position * 2 + channel] = (int16_t)mixed;
+                        uint32_t magnitude = mixed < 0 ? (uint32_t)-mixed : (uint32_t)mixed;
+                        if (magnitude > peak) peak = magnitude;
+                    }
+                    uint32_t bin = ((uint64_t)position * UAR_WAVEFORM_BINS) /
+                                   s_track_frames[track];
+                    if (bin >= UAR_WAVEFORM_BINS) bin = UAR_WAVEFORM_BINS - 1;
+                    if (peak > s_track_waveform[track][bin]) {
+                        s_track_waveform[track][bin] = peak > 32767 ? 32767 : peak;
                     }
                 }
                 s_overdub_frames += input_frames;
@@ -1017,6 +1038,20 @@ static void monitor_task(void *argument) {
                     memcpy(s_track_samples[track] + (size_t)s_track_frames[track] * 2,
                            block.samples + (size_t)record_offset * 2,
                            (size_t)copy_frames * 2 * sizeof(int16_t));
+                    for (uint32_t frame = 0; frame < copy_frames; frame++) {
+                        uint32_t position = s_track_frames[track] + frame;
+                        int32_t left = block.samples[(record_offset + frame) * 2];
+                        int32_t right = block.samples[(record_offset + frame) * 2 + 1];
+                        uint32_t left_mag = left < 0 ? (uint32_t)-left : (uint32_t)left;
+                        uint32_t right_mag = right < 0 ? (uint32_t)-right : (uint32_t)right;
+                        uint32_t peak = left_mag > right_mag ? left_mag : right_mag;
+                        uint32_t bin = ((uint64_t)position * UAR_WAVEFORM_BINS) /
+                                       target_frames;
+                        if (bin >= UAR_WAVEFORM_BINS) bin = UAR_WAVEFORM_BINS - 1;
+                        if (peak > s_track_waveform[track][bin]) {
+                            s_track_waveform[track][bin] = peak > 32767 ? 32767 : peak;
+                        }
+                    }
                     s_track_frames[track] += copy_frames;
                 }
             }

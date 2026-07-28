@@ -50,6 +50,8 @@ typedef enum {
     UAR_LOOP_PAUSED,
 } uar_loop_state_t;
 
+#define UAR_WAVEFORM_BINS 150
+
 void uar_loop_record_toggle(void);
 void uar_loop_play_toggle(void);
 void uar_loop_clear(void);
@@ -68,4 +70,5 @@ bool uar_loop_is_record_armed(void);
 void uar_loop_tap_tempo(void);
 void uar_loop_adjust_track_volume(int delta);
 void uar_loop_get_track_volumes(uint8_t volumes[4]);
+void uar_loop_get_waveforms(uint16_t waveforms[4][UAR_WAVEFORM_BINS]);
 void uar_monitor_adjust_volume(int delta);
