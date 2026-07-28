@@ -65,6 +65,31 @@ static void text(float x, float y, float size, pax_col_t color, const char *valu
     pax_draw_text(&s_framebuffer, color, pax_font_sky_mono, size, x, y, value);
 }
 
+static void render_meters_fast(void) {
+    // The most recently presented hardware framebuffer is the other buffer.
+    // Updating this small region directly lets the DPI engine pick it up on
+    // its next scan without waiting for a complete UI render or buffer swap.
+    pax_buf_t *target = &s_framebuffers[s_framebuffer_index ^ 1];
+    const float meter_top = 306;
+    const float meter_w = 22;
+    for (uint8_t channel = 0; channel < 6; channel++) {
+        float x = s_width - 154 + channel * (meter_w + 2);
+        pax_draw_rect(target, COLOR_DARK, x, meter_top, meter_w, 68);
+        float normalized = sqrtf((float)s_display_levels[channel] / 32767.0f);
+        float peak = sqrtf((float)s_peak_hold[channel] / 32767.0f);
+        for (uint8_t segment = 0; segment < 10; segment++) {
+            float threshold = (float)(segment + 1) / 10.0f;
+            float y = meter_top + 61 - segment * 7;
+            pax_col_t active = segment >= 9 ? COLOR_BAD :
+                               segment >= 7 ? COLOR_ACCENT : COLOR_GOOD;
+            pax_draw_rect(target, normalized >= threshold ? active : 0xff383939,
+                          x + 2, y, meter_w - 4, 5);
+        }
+        float peak_y = meter_top + 67 - peak * 67;
+        pax_draw_rect(target, COLOR_TEXT, x + 1, peak_y, meter_w - 2, 2);
+    }
+}
+
 static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
     int64_t draw_started = esp_timer_get_time();
     pax_background(&s_framebuffer, COLOR_BG);
@@ -259,6 +284,7 @@ void app_main(void) {
     char diagnostics[6][72] = {{0}};
     uint32_t diagnostic_revision = 0;
     uint32_t previous_diagnostic_revision = UINT32_MAX;
+    int64_t previous_animation_us = 0;
     uar_probe_snapshot(&previous);
     uar_probe_diagnostics(diagnostics, 6, &diagnostic_revision);
     render(&previous, diagnostics);
@@ -373,17 +399,20 @@ void app_main(void) {
         uar_loop_get_state(&loop_state, &loop_frames, &loop_position);
         uar_loop_get_settings(&loop_bpm, &loop_bars);
         uar_loop_get_tracks(&selected_track, track_frames, track_positions, &metronome);
-        bool loop_changed = loop_state != s_loop_state || loop_frames != s_loop_frames ||
-                            loop_position != s_loop_position || loop_bpm != s_loop_bpm ||
+        bool track_content_changed = false;
+        for (uint8_t track = 0; track < 4; track++) {
+            if ((track_frames[track] == 0) != (s_track_frames[track] == 0)) {
+                track_content_changed = true;
+            }
+        }
+        bool loop_changed = loop_state != s_loop_state || loop_bpm != s_loop_bpm ||
                             loop_bars != s_loop_bars || selected_track != s_selected_track ||
                             metronome != s_metronome ||
                             overdubbing != s_overdubbing ||
                             record_armed != s_record_armed ||
                             memcmp(track_volumes, s_track_volumes,
                                    sizeof(track_volumes)) != 0 ||
-                            memcmp(track_frames, s_track_frames, sizeof(track_frames)) != 0 ||
-                            memcmp(track_positions, s_track_positions,
-                                   sizeof(track_positions)) != 0;
+                            track_content_changed;
         s_loop_state = loop_state;
         s_loop_frames = loop_frames;
         s_loop_position = loop_position;
@@ -396,7 +425,6 @@ void app_main(void) {
         memcpy(s_track_frames, track_frames, sizeof(s_track_frames));
         memcpy(s_track_positions, track_positions, sizeof(s_track_positions));
         s_metronome = metronome;
-        bool meter_changed = packet_count != s_audio_packets || error_count != s_audio_errors;
         s_audio_packets = packet_count;
         s_audio_errors = error_count;
         s_audio_bytes = audio_bytes;
@@ -417,12 +445,20 @@ void app_main(void) {
                 s_peak_hold[channel] = (uint16_t)(((uint32_t)s_peak_hold[channel] * 94) / 100);
             }
         }
+        render_meters_fast();
+        int64_t now_us = esp_timer_get_time();
+        bool transport_animating =
+            loop_state == UAR_LOOP_PLAYING || loop_state == UAR_LOOP_RECORDING ||
+            record_armed;
+        bool animation_due =
+            transport_animating && now_us - previous_animation_us >= 33333;
         if (memcmp(&current, &previous, sizeof(current)) != 0 ||
-            diagnostic_revision != previous_diagnostic_revision || meter_changed ||
-            loop_changed) {
+            diagnostic_revision != previous_diagnostic_revision || loop_changed ||
+            animation_due) {
             render(&current, diagnostics);
             previous = current;
             previous_diagnostic_revision = diagnostic_revision;
+            previous_animation_us = now_us;
         }
         // The display driver already gates blits on the previous DMA transfer.
         // A short yield keeps input responsive and queues the next visual frame
