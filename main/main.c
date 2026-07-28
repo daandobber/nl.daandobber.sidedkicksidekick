@@ -64,6 +64,8 @@ static int16_t s_previous_main_cursor[2] = {-1, -1};
 static int16_t s_previous_track_cursor[2][4] = {
     {-1, -1, -1, -1}, {-1, -1, -1, -1}
 };
+static uint16_t s_large_waveform_cache[2][UAR_WAVEFORM_BINS];
+static uint8_t s_large_waveform_track[2] = {0xff, 0xff};
 
 static void text(float x, float y, float size, pax_col_t color, const char *value) {
     pax_draw_text(&s_framebuffer, color, pax_font_sky_mono, size, x, y, value);
@@ -94,6 +96,28 @@ static void render_transport_fast(void) {
         pax_draw_rect(target, 0xff343535, s_previous_main_cursor[displayed],
                       timeline_y, 3, 24);
     }
+    bool track_changed = s_large_waveform_track[displayed] != s_selected_track;
+    int16_t previous_cursor = s_previous_main_cursor[displayed];
+    for (uint16_t bin = 0; bin < UAR_WAVEFORM_BINS; bin++) {
+        float bin_x = timeline_x + timeline_w * bin / UAR_WAVEFORM_BINS;
+        float next_x = timeline_x + timeline_w * (bin + 1) / UAR_WAVEFORM_BINS;
+        bool cursor_erased_here =
+            previous_cursor >= (int16_t)bin_x - 3 &&
+            previous_cursor < (int16_t)next_x + 1;
+        uint16_t amplitude_value = s_track_waveforms[s_selected_track][bin];
+        if (track_changed || cursor_erased_here ||
+            s_large_waveform_cache[displayed][bin] != amplitude_value) {
+            float width = next_x - bin_x + 1;
+            pax_draw_rect(target, 0xff343535, bin_x, timeline_y, width, 24);
+            float amplitude = 10.0f * amplitude_value / 32767.0f;
+            pax_draw_rect(target,
+                          s_loop_state == UAR_LOOP_RECORDING ? COLOR_BAD : COLOR_GOOD,
+                          bin_x, timeline_y + 12 - amplitude, width,
+                          amplitude * 2 + 1);
+            s_large_waveform_cache[displayed][bin] = amplitude_value;
+        }
+    }
+    s_large_waveform_track[displayed] = s_selected_track;
     for (uint8_t bar = 1; bar < s_loop_bars; bar++) {
         float x = timeline_x + timeline_w * ((float)bar / s_loop_bars);
         pax_draw_rect(target, COLOR_TEXT, x, timeline_y, 2, 24);
@@ -189,12 +213,26 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         const float timeline_y = 218;
         const float timeline_w = (float)s_width - 80;
         pax_draw_rect(&s_framebuffer, 0xff343535, timeline_x, timeline_y, timeline_w, 24);
+        for (uint16_t bin = 0; bin < UAR_WAVEFORM_BINS; bin++) {
+            float bin_x = timeline_x + timeline_w * bin / UAR_WAVEFORM_BINS;
+            float next_x = timeline_x + timeline_w * (bin + 1) / UAR_WAVEFORM_BINS;
+            float amplitude =
+                10.0f * s_track_waveforms[s_selected_track][bin] / 32767.0f;
+            pax_draw_rect(&s_framebuffer,
+                          s_loop_state == UAR_LOOP_RECORDING ? COLOR_BAD : COLOR_GOOD,
+                          bin_x, timeline_y + 12 - amplitude,
+                          next_x - bin_x + 1, amplitude * 2 + 1);
+        }
         pax_draw_rect(&s_framebuffer, transport_color,
                       timeline_x + timeline_w * progress, timeline_y, 3, 24);
         for (uint8_t bar = 1; bar < s_loop_bars; bar++) {
             float x = timeline_x + timeline_w * ((float)bar / s_loop_bars);
             pax_draw_rect(&s_framebuffer, COLOR_TEXT, x, timeline_y, 2, 24);
         }
+        memcpy(s_large_waveform_cache[s_framebuffer_index],
+               s_track_waveforms[s_selected_track],
+               sizeof(s_large_waveform_cache[s_framebuffer_index]));
+        s_large_waveform_track[s_framebuffer_index] = s_selected_track;
         snprintf(line, sizeof(line), "BAR %u / %u",
                  s_loop_frames ? (unsigned)(progress * s_loop_bars) + 1 : 0,
                  s_loop_bars);
