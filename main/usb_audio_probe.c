@@ -587,6 +587,13 @@ static esp_err_t start_meter_stream(
     ESP_LOGI(TAG, "Meter stream started: %uch, %u-byte samples, packet %u, endpoint %02x",
              s_stream_channels, s_stream_subslot, s_stream_packet_size,
              stream->endpoint_address);
+    // Enumeration diagnostics are useful during connection, but verbose USB
+    // logging competes with animation once the real-time stream is healthy.
+    esp_log_level_set("USB_HOST", ESP_LOG_WARN);
+    esp_log_level_set("USBH", ESP_LOG_WARN);
+    esp_log_level_set("HUB", ESP_LOG_WARN);
+    esp_log_level_set("ENUM", ESP_LOG_WARN);
+    esp_log_level_set("usb", ESP_LOG_WARN);
     return ESP_OK;
 }
 

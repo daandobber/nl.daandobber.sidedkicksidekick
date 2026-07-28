@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -159,12 +160,19 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
             float x = s_width - 154 + channel * (meter_w + 2);
             text(x, meter_top - 22, 11, COLOR_DIM, input_names[channel]);
             pax_draw_rect(&s_framebuffer, COLOR_DARK, x, meter_top, meter_w, 68);
-            float normalized = (float)s_display_levels[channel] / 32767.0f;
-            pax_col_t meter_color = normalized > 0.90f ? COLOR_BAD :
-                                    normalized > 0.68f ? COLOR_ACCENT : COLOR_GOOD;
-            float height = 68 * normalized;
-            pax_draw_rect(&s_framebuffer, meter_color, x, meter_top + 68 - height,
-                          meter_w, height);
+            float normalized = sqrtf((float)s_display_levels[channel] / 32767.0f);
+            float peak = sqrtf((float)s_peak_hold[channel] / 32767.0f);
+            for (uint8_t segment = 0; segment < 10; segment++) {
+                float threshold = (float)(segment + 1) / 10.0f;
+                float y = meter_top + 61 - segment * 7;
+                pax_col_t active = segment >= 9 ? COLOR_BAD :
+                                   segment >= 7 ? COLOR_ACCENT : COLOR_GOOD;
+                pax_draw_rect(&s_framebuffer,
+                              normalized >= threshold ? active : 0xff383939,
+                              x + 2, y, meter_w - 4, 5);
+            }
+            float peak_y = meter_top + 67 - peak * 67;
+            pax_draw_rect(&s_framebuffer, COLOR_TEXT, x + 1, peak_y, meter_w - 2, 2);
         }
     }
 
@@ -214,6 +222,7 @@ void app_main(void) {
     ESP_ERROR_CHECK(bsp_device_initialize(&configuration));
     graphics_initialize();
     ESP_ERROR_CHECK(bsp_input_get_queue(&s_input_queue));
+    vTaskPrioritySet(NULL, 5);
 
     uar_probe_snapshot_t previous = {0};
     char diagnostics[6][72] = {{0}};
@@ -384,6 +393,9 @@ void app_main(void) {
             previous = current;
             previous_diagnostic_revision = diagnostic_revision;
         }
-        vTaskDelay(pdMS_TO_TICKS(16));
+        // The display driver already gates blits on the previous DMA transfer.
+        // A short yield keeps input responsive and queues the next visual frame
+        // for the earliest panel refresh instead of adding a second frame delay.
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
