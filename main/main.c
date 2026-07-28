@@ -430,16 +430,19 @@ void app_main(void) {
         s_audio_bytes = audio_bytes;
         s_nonzero_bytes = nonzero_bytes;
         for (uint8_t channel = 0; channel < 8; channel++) {
-            // The LED body follows the exact latest USB audio window in both
-            // directions. Only the thin peak marker has a short readable hold.
-            s_display_levels[channel] = fresh_levels[channel];
+            if (fresh_levels[channel] >= s_display_levels[channel]) {
+                s_display_levels[channel] = fresh_levels[channel];
+            } else {
+                s_display_levels[channel] =
+                    (uint16_t)(((uint32_t)s_display_levels[channel] * 82) / 100);
+            }
             if (fresh_levels[channel] >= s_peak_hold[channel]) {
                 s_peak_hold[channel] = fresh_levels[channel];
-                s_peak_hold_ticks[channel] = 4;
+                s_peak_hold_ticks[channel] = 18;
             } else if (s_peak_hold_ticks[channel] > 0) {
                 s_peak_hold_ticks[channel]--;
             } else {
-                s_peak_hold[channel] = (uint16_t)(((uint32_t)s_peak_hold[channel] * 70) / 100);
+                s_peak_hold[channel] = (uint16_t)(((uint32_t)s_peak_hold[channel] * 94) / 100);
             }
         }
         render_meters_fast();
