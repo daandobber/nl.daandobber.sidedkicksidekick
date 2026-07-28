@@ -64,6 +64,7 @@ void uar_loop_get_tracks(
 );
 void uar_loop_select_track(uint8_t track);
 bool uar_loop_is_overdubbing(void);
+bool uar_loop_is_record_armed(void);
 void uar_loop_tap_tempo(void);
 void uar_loop_adjust_track_volume(int delta);
 void uar_loop_get_track_volumes(uint8_t volumes[4]);

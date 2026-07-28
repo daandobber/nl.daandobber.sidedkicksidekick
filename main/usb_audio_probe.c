@@ -81,6 +81,8 @@ static volatile uint8_t s_selected_track;
 static volatile bool s_metronome;
 static uint64_t s_transport_frame;
 static volatile bool s_overdubbing;
+static volatile bool s_record_armed;
+static volatile bool s_pending_overdub;
 static volatile uint32_t s_overdub_frames;
 static volatile uint8_t s_track_volume[4] = {100, 100, 100, 100};
 static volatile uint8_t s_monitor_volume = 55;
@@ -201,19 +203,17 @@ void uar_loop_record_toggle(void) {
         taskEXIT_CRITICAL(&s_lock);
         return;
     }
-    if (s_loop_state == UAR_LOOP_RECORDING) {
+    if (s_record_armed) {
+        s_record_armed = false;
+        s_pending_overdub = false;
+    } else if (s_loop_state == UAR_LOOP_RECORDING) {
         s_track_position[s_selected_track] = 0;
         s_loop_state = s_track_frames[s_selected_track] > 0 ?
                        UAR_LOOP_PLAYING : UAR_LOOP_EMPTY;
         s_overdubbing = false;
     } else {
-        s_overdubbing = s_track_frames[s_selected_track] > 0;
-        s_overdub_frames = 0;
-        if (!s_overdubbing) {
-            s_track_frames[s_selected_track] = 0;
-            s_track_position[s_selected_track] = 0;
-        }
-        s_loop_state = UAR_LOOP_RECORDING;
+        s_pending_overdub = s_track_frames[s_selected_track] > 0;
+        s_record_armed = true;
     }
     taskEXIT_CRITICAL(&s_lock);
 }
@@ -231,6 +231,8 @@ void uar_loop_play_toggle(void) {
 
 void uar_loop_clear(void) {
     taskENTER_CRITICAL(&s_lock);
+    s_record_armed = false;
+    s_pending_overdub = false;
     s_track_frames[s_selected_track] = 0;
     s_track_position[s_selected_track] = 0;
     bool any = false;
@@ -249,14 +251,16 @@ void uar_loop_get_state(uar_loop_state_t *state, uint32_t *frames, uint32_t *pos
 
 void uar_loop_select_next_track(void) {
     taskENTER_CRITICAL(&s_lock);
-    if (s_loop_state != UAR_LOOP_RECORDING) s_selected_track = (s_selected_track + 1) % 4;
+    if (s_loop_state != UAR_LOOP_RECORDING && !s_record_armed) {
+        s_selected_track = (s_selected_track + 1) % 4;
+    }
     taskEXIT_CRITICAL(&s_lock);
 }
 
 void uar_loop_select_track(uint8_t track) {
     if (track >= 4) return;
     taskENTER_CRITICAL(&s_lock);
-    if (s_loop_state != UAR_LOOP_RECORDING) s_selected_track = track;
+    if (s_loop_state != UAR_LOOP_RECORDING && !s_record_armed) s_selected_track = track;
     taskEXIT_CRITICAL(&s_lock);
 }
 
@@ -309,6 +313,10 @@ void uar_loop_tap_tempo(void) {
 
 bool uar_loop_is_overdubbing(void) {
     return s_overdubbing;
+}
+
+bool uar_loop_is_record_armed(void) {
+    return s_record_armed;
 }
 
 void uar_loop_toggle_metronome(void) {
@@ -960,28 +968,48 @@ static void monitor_task(void *argument) {
     monitor_block_t block;
     while (true) {
         if (xQueueReceive(s_monitor_queue, &block, portMAX_DELAY) != pdTRUE) continue;
+        uint16_t record_offset = 0;
+        if (s_record_armed) {
+            uint32_t bar_frames = (4U * 60U * 48000U) / s_loop_bpm;
+            uint32_t phase = (uint32_t)(s_transport_frame % bar_frames);
+            uint32_t until_bar = phase == 0 ? 0 : bar_frames - phase;
+            if (until_bar < block.frames) {
+                record_offset = (uint16_t)until_bar;
+                s_overdubbing = s_pending_overdub;
+                s_pending_overdub = false;
+                s_overdub_frames = 0;
+                if (!s_overdubbing) {
+                    s_track_frames[s_selected_track] = 0;
+                    s_track_position[s_selected_track] = 0;
+                }
+                s_record_armed = false;
+                s_loop_state = UAR_LOOP_RECORDING;
+            }
+        }
         if (s_loop_state == UAR_LOOP_RECORDING) {
             uint8_t track = s_selected_track;
+            uint16_t input_frames = block.frames - record_offset;
             uint32_t target_frames =
                 ((uint32_t)s_loop_bars * 4U * 60U * 48000U) / s_loop_bpm;
             if (target_frames > LOOP_MAX_FRAMES) target_frames = LOOP_MAX_FRAMES;
             if (s_overdubbing) {
-                for (uint16_t frame = 0; frame < block.frames; frame++) {
-                    uint32_t position = (s_track_position[track] + frame) %
+                for (uint16_t frame = 0; frame < input_frames; frame++) {
+                    uint32_t position = (s_track_position[track] + record_offset + frame) %
                                         s_track_frames[track];
                     for (uint8_t channel = 0; channel < 2; channel++) {
                         int32_t mixed = s_track_samples[track][position * 2 + channel] / 2 +
-                                        block.samples[frame * 2 + channel] / 2;
+                                        block.samples[(record_offset + frame) * 2 + channel] / 2;
                         s_track_samples[track][position * 2 + channel] = (int16_t)mixed;
                     }
                 }
-                s_overdub_frames += block.frames;
+                s_overdub_frames += input_frames;
             } else {
                 uint32_t available = target_frames - s_track_frames[track];
-                uint32_t copy_frames = block.frames < available ? block.frames : available;
+                uint32_t copy_frames = input_frames < available ? input_frames : available;
                 if (copy_frames > 0) {
                     memcpy(s_track_samples[track] + (size_t)s_track_frames[track] * 2,
-                           block.samples, (size_t)copy_frames * 2 * sizeof(int16_t));
+                           block.samples + (size_t)record_offset * 2,
+                           (size_t)copy_frames * 2 * sizeof(int16_t));
                     s_track_frames[track] += copy_frames;
                 }
             }
@@ -993,7 +1021,7 @@ static void monitor_task(void *argument) {
             }
         }
         if (s_loop_state == UAR_LOOP_PLAYING ||
-            s_loop_state == UAR_LOOP_RECORDING || s_metronome) {
+            s_loop_state == UAR_LOOP_RECORDING || s_record_armed || s_metronome) {
             uint8_t active_tracks = 0;
             for (uint8_t track = 0; track < 4; track++) {
                 if (s_loop_state == UAR_LOOP_RECORDING && track == s_selected_track &&
@@ -1012,7 +1040,7 @@ static void monitor_task(void *argument) {
                         int32_t track_sample =
                             s_track_samples[track][s_track_position[track] * 2 + channel];
                         mixed += (track_sample * s_track_volume[track]) /
-                                 (200 * active_tracks);
+                                 (100 * active_tracks);
                     }
                     if (s_metronome) {
                         uint32_t beat_frames = (60U * 48000U) / s_loop_bpm;

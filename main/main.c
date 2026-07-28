@@ -46,6 +46,7 @@ static uint32_t s_track_frames[4];
 static uint32_t s_track_positions[4];
 static bool s_metronome;
 static bool s_overdubbing;
+static bool s_record_armed;
 static uint8_t s_track_volumes[4] = {100, 100, 100, 100};
 
 static void text(float x, float y, float size, pax_col_t color, const char *value) {
@@ -76,6 +77,7 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         text(224, 128, 58, COLOR_TEXT, line);
         text(390, 108, 18, COLOR_DIM, "TRANSPORT");
         text(390, 142, 34, transport_color,
+             s_record_armed ? "WAITING FOR BAR" :
              s_overdubbing ? "OVERDUB" : states[s_loop_state]);
 
         float progress = s_loop_frames > 0 ?
@@ -284,6 +286,7 @@ void app_main(void) {
         uint32_t track_positions[4] = {0};
         bool metronome = false;
         bool overdubbing = uar_loop_is_overdubbing();
+        bool record_armed = uar_loop_is_record_armed();
         uint8_t track_volumes[4];
         uar_loop_get_track_volumes(track_volumes);
         uar_loop_get_state(&loop_state, &loop_frames, &loop_position);
@@ -294,6 +297,7 @@ void app_main(void) {
                             loop_bars != s_loop_bars || selected_track != s_selected_track ||
                             metronome != s_metronome ||
                             overdubbing != s_overdubbing ||
+                            record_armed != s_record_armed ||
                             memcmp(track_volumes, s_track_volumes,
                                    sizeof(track_volumes)) != 0 ||
                             memcmp(track_frames, s_track_frames, sizeof(track_frames)) != 0 ||
@@ -306,6 +310,7 @@ void app_main(void) {
         s_loop_bars = loop_bars;
         s_selected_track = selected_track;
         s_overdubbing = overdubbing;
+        s_record_armed = record_armed;
         memcpy(s_track_volumes, track_volumes, sizeof(s_track_volumes));
         memcpy(s_track_frames, track_frames, sizeof(s_track_frames));
         memcpy(s_track_positions, track_positions, sizeof(s_track_positions));
