@@ -1,5 +1,4 @@
 #include <stdbool.h>
-#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -65,28 +64,48 @@ static void text(float x, float y, float size, pax_col_t color, const char *valu
     pax_draw_text(&s_framebuffer, color, pax_font_sky_mono, size, x, y, value);
 }
 
-static void render_meters_fast(void) {
-    // The most recently presented hardware framebuffer is the other buffer.
-    // Updating this small region directly lets the DPI engine pick it up on
-    // its next scan without waiting for a complete UI render or buffer swap.
+static void render_transport_fast(void) {
+    // Transport animation writes into the framebuffer currently scanned by
+    // the display. It therefore follows the audio positions without waiting
+    // for a complete UI render or another double-buffer swap.
     pax_buf_t *target = &s_framebuffers[s_framebuffer_index ^ 1];
-    const float meter_top = 306;
-    const float meter_w = 22;
-    for (uint8_t channel = 0; channel < 6; channel++) {
-        float x = s_width - 154 + channel * (meter_w + 2);
-        pax_draw_rect(target, COLOR_DARK, x, meter_top, meter_w, 68);
-        float normalized = sqrtf((float)s_display_levels[channel] / 32767.0f);
-        float peak = sqrtf((float)s_peak_hold[channel] / 32767.0f);
-        for (uint8_t segment = 0; segment < 10; segment++) {
-            float threshold = (float)(segment + 1) / 10.0f;
-            float y = meter_top + 61 - segment * 7;
-            pax_col_t active = segment >= 9 ? COLOR_BAD :
-                               segment >= 7 ? COLOR_ACCENT : COLOR_GOOD;
-            pax_draw_rect(target, normalized >= threshold ? active : 0xff383939,
-                          x + 2, y, meter_w - 4, 5);
+    float progress = s_loop_frames > 0 ?
+                     (float)s_loop_position / (float)s_loop_frames : 0;
+    if (s_loop_state == UAR_LOOP_RECORDING) {
+        uint32_t target_frames =
+            ((uint32_t)s_loop_bars * 4U * 60U * 48000U) / s_loop_bpm;
+        progress = target_frames > 0 ? (float)s_loop_frames / target_frames : 0;
+    }
+    if (progress > 1) progress = 1;
+    const float timeline_x = 40;
+    const float timeline_y = 218;
+    const float timeline_w = (float)s_width - 80;
+    pax_col_t transport_color = s_loop_state == UAR_LOOP_RECORDING ? COLOR_BAD :
+                                s_loop_state == UAR_LOOP_PLAYING ? COLOR_GOOD :
+                                COLOR_ACCENT;
+    pax_draw_rect(target, 0xff343535, timeline_x, timeline_y, timeline_w, 24);
+    pax_draw_rect(target, transport_color, timeline_x, timeline_y,
+                  timeline_w * progress, 24);
+    for (uint8_t bar = 1; bar < s_loop_bars; bar++) {
+        float x = timeline_x + timeline_w * ((float)bar / s_loop_bars);
+        pax_draw_rect(target, COLOR_TEXT, x, timeline_y, 2, 24);
+    }
+
+    for (uint8_t track = 0; track < 4; track++) {
+        float x = 34 + track * 187;
+        float width = 170;
+        float bar_x = x + 10;
+        float bar_y = 343;
+        float bar_w = width - 20;
+        pax_draw_rect(target, 0xff3b3c3c, bar_x, bar_y, bar_w, 18);
+        if (s_track_frames[track] > 0) {
+            float phase = (float)s_track_positions[track] / s_track_frames[track];
+            pax_draw_rect(target, COLOR_ACCENT, bar_x, bar_y, bar_w * phase, 18);
+            for (uint8_t division = 1; division < 4; division++) {
+                pax_draw_rect(target, COLOR_TEXT, bar_x + bar_w * division / 4,
+                              bar_y, 1, 18);
+            }
         }
-        float peak_y = meter_top + 67 - peak * 67;
-        pax_draw_rect(target, COLOR_TEXT, x + 1, peak_y, meter_w - 2, 2);
     }
 }
 
@@ -164,9 +183,9 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         text(164, 251, 14, s_metronome ? COLOR_ACCENT : COLOR_DIM, line);
 
         for (uint8_t track = 0; track < 4; track++) {
-            float x = 34 + track * 145;
+            float x = 34 + track * 187;
             float y = 296;
-            float width = 128;
+            float width = 170;
             float height = 98;
             pax_col_t color = track == s_selected_track ? COLOR_ACCENT :
                               s_track_frames[track] ? COLOR_DARK : COLOR_SHADOW;
@@ -192,27 +211,6 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
             text(x + 10, y + 72, 13, COLOR_TEXT, line);
         }
 
-        static const char *const input_names[] = {"1L", "1R", "2L", "2R", "AL", "AR"};
-        const float meter_top = 306;
-        const float meter_w = 22;
-        for (uint8_t channel = 0; channel < 6; channel++) {
-            float x = s_width - 154 + channel * (meter_w + 2);
-            text(x, meter_top - 22, 11, COLOR_DIM, input_names[channel]);
-            pax_draw_rect(&s_framebuffer, COLOR_DARK, x, meter_top, meter_w, 68);
-            float normalized = sqrtf((float)s_display_levels[channel] / 32767.0f);
-            float peak = sqrtf((float)s_peak_hold[channel] / 32767.0f);
-            for (uint8_t segment = 0; segment < 10; segment++) {
-                float threshold = (float)(segment + 1) / 10.0f;
-                float y = meter_top + 61 - segment * 7;
-                pax_col_t active = segment >= 9 ? COLOR_BAD :
-                                   segment >= 7 ? COLOR_ACCENT : COLOR_GOOD;
-                pax_draw_rect(&s_framebuffer,
-                              normalized >= threshold ? active : 0xff383939,
-                              x + 2, y, meter_w - 4, 5);
-            }
-            float peak_y = meter_top + 67 - peak * 67;
-            pax_draw_rect(&s_framebuffer, COLOR_TEXT, x + 1, peak_y, meter_w - 2, 2);
-        }
     }
 
     pax_draw_rect(&s_framebuffer, COLOR_DARK, 0, s_height - 55, s_width, 55);
@@ -284,7 +282,6 @@ void app_main(void) {
     char diagnostics[6][72] = {{0}};
     uint32_t diagnostic_revision = 0;
     uint32_t previous_diagnostic_revision = UINT32_MAX;
-    int64_t previous_animation_us = 0;
     uar_probe_snapshot(&previous);
     uar_probe_diagnostics(diagnostics, 6, &diagnostic_revision);
     render(&previous, diagnostics);
@@ -445,20 +442,12 @@ void app_main(void) {
                 s_peak_hold[channel] = (uint16_t)(((uint32_t)s_peak_hold[channel] * 94) / 100);
             }
         }
-        render_meters_fast();
-        int64_t now_us = esp_timer_get_time();
-        bool transport_animating =
-            loop_state == UAR_LOOP_PLAYING || loop_state == UAR_LOOP_RECORDING ||
-            record_armed;
-        bool animation_due =
-            transport_animating && now_us - previous_animation_us >= 33333;
+        render_transport_fast();
         if (memcmp(&current, &previous, sizeof(current)) != 0 ||
-            diagnostic_revision != previous_diagnostic_revision || loop_changed ||
-            animation_due) {
+            diagnostic_revision != previous_diagnostic_revision || loop_changed) {
             render(&current, diagnostics);
             previous = current;
             previous_diagnostic_revision = diagnostic_revision;
-            previous_animation_us = now_us;
         }
         // The display driver already gates blits on the previous DMA transfer.
         // A short yield keeps input responsive and queues the next visual frame
