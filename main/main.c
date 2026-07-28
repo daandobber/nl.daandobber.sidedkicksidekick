@@ -16,13 +16,16 @@
 #include "pax_text.h"
 #include "usb_audio_probe.h"
 
-#define COLOR_BG 0xff171a1c
-#define COLOR_PANEL 0xff24292d
-#define COLOR_TEXT 0xffeee9df
-#define COLOR_DIM 0xff9ca7a8
-#define COLOR_ACCENT 0xfff2c14e
-#define COLOR_GOOD 0xff72c69c
-#define COLOR_BAD 0xffdc7c73
+#define COLOR_BG 0xffc8c7c5
+#define COLOR_PANEL 0xff111313
+#define COLOR_TEXT 0xfff1f0ec
+#define COLOR_DARK 0xff262728
+#define COLOR_DIM 0xff696968
+#define COLOR_ACCENT 0xffff4b16
+#define COLOR_GOOD 0xffff762d
+#define COLOR_BAD 0xffff3010
+#define COLOR_SILVER 0xffe2e0dc
+#define COLOR_SHADOW 0xff8e8d8b
 
 static const char *TAG = "usb_recorder";
 static pax_buf_t s_framebuffer;
@@ -55,28 +58,45 @@ static void text(float x, float y, float size, pax_col_t color, const char *valu
 
 static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
     pax_background(&s_framebuffer, COLOR_BG);
-    pax_draw_rect(&s_framebuffer, COLOR_PANEL, 22, 18, s_width - 44, 68);
-    text(40, 34, 30, COLOR_ACCENT, "SIDEKICK SIDEKICK");
-    text(s_width - 190, 45, 16, probe->connected ? COLOR_GOOD : COLOR_BAD,
-         probe->connected ? "●  EP-136" : "○  NO DEVICE");
+    pax_draw_rect(&s_framebuffer, COLOR_SHADOW, 0, 0, s_width, 5);
+    pax_draw_rect(&s_framebuffer, COLOR_SILVER, 0, 5, s_width, 86);
+    pax_draw_rect(&s_framebuffer, COLOR_DIM, 0, 88, s_width, 3);
+
+    pax_draw_rect(&s_framebuffer, COLOR_TEXT, 18, 5, 92, 25);
+    pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 110, 5, 116, 25);
+    pax_draw_rect(&s_framebuffer, COLOR_DARK, 226, 5, 92, 25);
+    text(38, 10, 13, COLOR_DIM, "OUTPUT");
+    text(145, 10, 13, COLOR_TEXT, "INPUT");
+    text(252, 10, 13, COLOR_TEXT, "USB");
+
+    text(24, 39, 30, COLOR_DARK, "K.O.");
+    text(102, 47, 19, COLOR_DIM, "SIDEKICK SIDEKICK");
+    text(25, 68, 14, COLOR_ACCENT, "ミキサー  //  LOOP STATION");
+    pax_draw_circle(&s_framebuffer, COLOR_SHADOW, 10, 78, 6);
+    pax_draw_circle(&s_framebuffer, COLOR_SHADOW, s_width - 10, 78, 6);
+    text(s_width - 180, 51, 14, probe->connected ? COLOR_ACCENT : COLOR_DIM,
+         probe->connected ? "● EP-136 LIVE" : "○ NO DEVICE");
 
     if (!probe->connected) {
-        text(150, 190, 28, COLOR_TEXT, "CONNECT EP-136 TO START");
-        text(218, 238, 16, COLOR_DIM, "USB AUDIO  •  48 kHz");
+        pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 105, s_width - 40, 250, 5);
+        text(150, 190, 28, COLOR_ACCENT, "CONNECT EP-136 TO START");
+        text(218, 238, 16, COLOR_TEXT, "USB AUDIO  //  48 kHz");
     } else {
         char line[96];
         static const char *const states[] = {"READY", "RECORDING", "PLAYING", "PAUSED"};
         pax_col_t transport_color = s_loop_state == UAR_LOOP_RECORDING ? COLOR_BAD :
                                     s_loop_state == UAR_LOOP_PLAYING ? COLOR_GOOD :
                                     COLOR_ACCENT;
-        text(38, 108, 18, COLOR_DIM, "BPM");
+        pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 103, s_width - 40, 178, 5);
+        pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, 103, 8, 178);
+        text(42, 115, 14, COLOR_ACCENT, "TEMPO");
         snprintf(line, sizeof(line), "%u", s_loop_bpm);
-        text(34, 128, 58, COLOR_TEXT, line);
-        text(220, 108, 18, COLOR_DIM, "BARS");
+        text(38, 135, 52, COLOR_TEXT, line);
+        text(202, 115, 14, COLOR_ACCENT, "BAR");
         snprintf(line, sizeof(line), "%u", s_loop_bars);
-        text(224, 128, 58, COLOR_TEXT, line);
-        text(390, 108, 18, COLOR_DIM, "TRANSPORT");
-        text(390, 142, 34, transport_color,
+        text(203, 135, 52, COLOR_TEXT, line);
+        text(336, 115, 14, COLOR_DIM, "LOOPER STATUS");
+        text(336, 142, 28, transport_color,
              s_record_armed ? "WAITING FOR BAR" :
              s_overdubbing ? "OVERDUB" : states[s_loop_state]);
 
@@ -87,60 +107,71 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
             progress = target > 0 ? (float)s_loop_frames / (float)target : 0;
         }
         if (progress > 1) progress = 1;
-        const float timeline_x = 34;
+        const float timeline_x = 40;
         const float timeline_y = 218;
-        const float timeline_w = (float)s_width - 68;
-        pax_draw_rect(&s_framebuffer, 0xff0d0f10, timeline_x, timeline_y, timeline_w, 32);
+        const float timeline_w = (float)s_width - 80;
+        pax_draw_rect(&s_framebuffer, 0xff343535, timeline_x, timeline_y, timeline_w, 24);
         pax_draw_rect(&s_framebuffer, transport_color, timeline_x, timeline_y,
-                      timeline_w * progress, 32);
+                      timeline_w * progress, 24);
         for (uint8_t bar = 1; bar < s_loop_bars; bar++) {
             float x = timeline_x + timeline_w * ((float)bar / s_loop_bars);
-            pax_draw_rect(&s_framebuffer, COLOR_TEXT, x, timeline_y, 2, 32);
+            pax_draw_rect(&s_framebuffer, COLOR_TEXT, x, timeline_y, 2, 24);
         }
         snprintf(line, sizeof(line), "BAR %u / %u",
                  s_loop_frames ? (unsigned)(progress * s_loop_bars) + 1 : 0,
                  s_loop_bars);
-        text(34, 266, 18, COLOR_TEXT, line);
+        text(40, 251, 14, COLOR_TEXT, line);
         snprintf(line, sizeof(line), "METRO %s", s_metronome ? "ON" : "OFF");
-        text(170, 266, 18, s_metronome ? COLOR_GOOD : COLOR_DIM, line);
+        text(164, 251, 14, s_metronome ? COLOR_ACCENT : COLOR_DIM, line);
+
         for (uint8_t track = 0; track < 4; track++) {
-            float x = 380 + track * 82;
-            float y = 284;
+            float x = 92 + track * 132;
+            float y = 333;
             pax_col_t color = track == s_selected_track ? COLOR_ACCENT :
-                              s_track_frames[track] ? COLOR_GOOD : COLOR_DIM;
+                              s_track_frames[track] ? COLOR_DARK : COLOR_SHADOW;
+            pax_draw_circle(&s_framebuffer, COLOR_SHADOW, x + 3, y + 4, 38);
+            pax_draw_circle(&s_framebuffer, COLOR_DARK, x, y, 37);
+            pax_draw_circle(&s_framebuffer, 0xff4a4a49, x, y, 29);
             for (uint8_t ring = 0; ring < (track == s_selected_track ? 4 : 2); ring++) {
-                pax_draw_circle(&s_framebuffer, color, x, y, 27 + ring);
+                pax_draw_circle(&s_framebuffer, color, x, y, 37 + ring);
             }
             if (s_track_frames[track] > 0) {
                 float phase = (float)s_track_positions[track] / s_track_frames[track];
                 for (uint8_t ring = 0; ring < 4; ring++) {
-                    pax_draw_arc(&s_framebuffer, COLOR_TEXT, x, y, 21 + ring,
+                    pax_draw_arc(&s_framebuffer, COLOR_ACCENT, x, y, 31 + ring,
                                  -1.5708f, -1.5708f + phase * 6.28318f);
                 }
             }
             snprintf(line, sizeof(line), "%u", track + 1);
-            text(x - 5, y - 9, 19, color, line);
+            text(x - 6, y - 10, 21, COLOR_TEXT, line);
+            text(x - 25, y - 62, 13, color,
+                 track == s_selected_track ? "SELECT" : "LOOP");
             snprintf(line, sizeof(line), "%u%%", s_track_volumes[track]);
-            text(x - 17, y + 35, 12, color, line);
+            text(x - 18, y + 47, 13, COLOR_DARK, line);
         }
 
         static const char *const input_names[] = {"1L", "1R", "2L", "2R", "AL", "AR"};
-        const float meter_top = 356;
-        const float meter_w = ((float)s_width - 90) / 6;
+        const float meter_top = 306;
+        const float meter_w = 22;
         for (uint8_t channel = 0; channel < 6; channel++) {
-            float x = 34 + channel * (meter_w + 4);
-            text(x, meter_top - 24, 14, COLOR_DIM, input_names[channel]);
-            pax_draw_rect(&s_framebuffer, 0xff0d0f10, x, meter_top, meter_w, 18);
+            float x = s_width - 154 + channel * (meter_w + 2);
+            text(x, meter_top - 22, 11, COLOR_DIM, input_names[channel]);
+            pax_draw_rect(&s_framebuffer, COLOR_DARK, x, meter_top, meter_w, 68);
             float normalized = (float)s_display_levels[channel] / 32767.0f;
             pax_col_t meter_color = normalized > 0.90f ? COLOR_BAD :
                                     normalized > 0.68f ? COLOR_ACCENT : COLOR_GOOD;
-            pax_draw_rect(&s_framebuffer, meter_color, x, meter_top,
-                          meter_w * normalized, 18);
+            float height = 68 * normalized;
+            pax_draw_rect(&s_framebuffer, meter_color, x, meter_top + 68 - height,
+                          meter_w, height);
         }
     }
 
-    text(30, s_height - 27, 14, COLOR_DIM,
-        "↑↓ TRACK VOL  B+↑↓ BPM  ←→ BARS  1-4 TRACK  F2 REC/OD  T TAP  M METRO");
+    pax_draw_rect(&s_framebuffer, COLOR_DARK, 0, s_height - 55, s_width, 55);
+    pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, s_height - 55, 92, 55);
+    text(34, s_height - 42, 15, COLOR_TEXT, "F2 REC");
+    text(34, s_height - 23, 12, COLOR_TEXT, "/ OVERDUB");
+    text(132, s_height - 38, 13, COLOR_TEXT,
+        "↑↓ LOOP VOL   B+↑↓ BPM   ←→ BARS   1-4 TRACK   T TAP   M METRO   F1 EXIT");
     bsp_display_blit(0, 0, s_width, s_height, pax_buf_get_pixels(&s_framebuffer));
 }
 
