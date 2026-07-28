@@ -8,6 +8,7 @@
 #include "bsp/input.h"
 #include "bsp/power.h"
 #include "esp_err.h"
+#include "esp_lcd_mipi_dsi.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -30,6 +31,8 @@
 
 static const char *TAG = "usb_recorder";
 static pax_buf_t s_framebuffer;
+static pax_buf_t s_framebuffers[2];
+static unsigned s_framebuffer_index;
 static size_t s_width;
 static size_t s_height;
 static size_t s_physical_width;
@@ -184,6 +187,8 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         "↑↓ LOOP VOL   B+↑↓ BPM   ←→ BARS   1-4 TRACK   T TAP   M METRO   F1 EXIT");
     bsp_display_blit(0, 0, s_physical_width, s_physical_height,
                      pax_buf_get_pixels(&s_framebuffer));
+    s_framebuffer_index ^= 1;
+    s_framebuffer = s_framebuffers[s_framebuffer_index];
 }
 
 static void graphics_initialize(void) {
@@ -192,11 +197,14 @@ static void graphics_initialize(void) {
     ESP_ERROR_CHECK(bsp_display_get_parameters(
         &s_physical_width, &s_physical_height, &format, &endianness
     ));
-    pax_buf_type_t type = PAX_BUF_24_888RGB;
-    if (format == BSP_DISPLAY_COLOR_FORMAT_16_565RGB) type = PAX_BUF_16_565RGB;
-    if (format == BSP_DISPLAY_COLOR_FORMAT_32_8888ARGB) type = PAX_BUF_32_8888ARGB;
-    pax_buf_init(&s_framebuffer, NULL, s_physical_width, s_physical_height, type);
-    pax_buf_reversed(&s_framebuffer, endianness == BSP_DISPLAY_ENDIAN_BIG);
+    ESP_ERROR_CHECK(format == BSP_DISPLAY_COLOR_FORMAT_16_565RGB ?
+                    ESP_OK : ESP_ERR_NOT_SUPPORTED);
+    esp_lcd_panel_handle_t panel;
+    void *display_pixels[2] = {0};
+    ESP_ERROR_CHECK(bsp_display_get_panel(&panel));
+    ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(
+        panel, 2, &display_pixels[0], &display_pixels[1]
+    ));
     pax_orientation_t orientation = PAX_O_UPRIGHT;
     switch (bsp_display_get_default_rotation()) {
         case BSP_DISPLAY_ROTATION_90: orientation = PAX_O_ROT_CCW; break;
@@ -204,7 +212,16 @@ static void graphics_initialize(void) {
         case BSP_DISPLAY_ROTATION_270: orientation = PAX_O_ROT_CW; break;
         default: break;
     }
-    pax_buf_set_orientation(&s_framebuffer, orientation);
+    for (size_t index = 0; index < 2; index++) {
+        ESP_ERROR_CHECK(pax_buf_init(
+            &s_framebuffers[index], display_pixels[index],
+            s_physical_width, s_physical_height, PAX_BUF_16_565RGB
+        ) ? ESP_OK : ESP_ERR_NO_MEM);
+        pax_buf_reversed(&s_framebuffers[index], endianness == BSP_DISPLAY_ENDIAN_BIG);
+        pax_buf_set_orientation(&s_framebuffers[index], orientation);
+    }
+    s_framebuffer_index = 0;
+    s_framebuffer = s_framebuffers[0];
     s_width = pax_buf_get_width(&s_framebuffer);
     s_height = pax_buf_get_height(&s_framebuffer);
     ESP_LOGI(TAG, "Display: physical %ux%u, logical %ux%u",
@@ -215,8 +232,8 @@ static void graphics_initialize(void) {
 void app_main(void) {
     const bsp_configuration_t configuration = {
         .display = {
-            .requested_color_format = BSP_DISPLAY_COLOR_FORMAT_24_888RGB,
-            .num_fbs = 1,
+            .requested_color_format = BSP_DISPLAY_COLOR_FORMAT_16_565RGB,
+            .num_fbs = 2,
         },
     };
     ESP_ERROR_CHECK(bsp_device_initialize(&configuration));
