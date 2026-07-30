@@ -18,6 +18,7 @@
 #include "pax_fonts.h"
 #include "pax_gfx.h"
 #include "pax_text.h"
+#include "lvgl_ui.h"
 #include "usb_audio_probe.h"
 
 #define COLOR_BG 0xffc8c7c5
@@ -39,6 +40,7 @@ static size_t s_width;
 static size_t s_height;
 static size_t s_physical_width;
 static size_t s_physical_height;
+static void *s_display_pixels[2];
 static QueueHandle_t s_input_queue;
 static uint16_t s_display_levels[8];
 static uint16_t s_peak_hold[8];
@@ -612,10 +614,9 @@ static void graphics_initialize(void) {
     ESP_ERROR_CHECK(format == BSP_DISPLAY_COLOR_FORMAT_16_565RGB ?
                     ESP_OK : ESP_ERR_NOT_SUPPORTED);
     esp_lcd_panel_handle_t panel;
-    void *display_pixels[2] = {0};
     ESP_ERROR_CHECK(bsp_display_get_panel(&panel));
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_get_frame_buffer(
-        panel, 2, &display_pixels[0], &display_pixels[1]
+        panel, 2, &s_display_pixels[0], &s_display_pixels[1]
     ));
     pax_orientation_t orientation = PAX_O_UPRIGHT;
     switch (bsp_display_get_default_rotation()) {
@@ -626,7 +627,7 @@ static void graphics_initialize(void) {
     }
     for (size_t index = 0; index < 2; index++) {
         ESP_ERROR_CHECK(pax_buf_init(
-            &s_framebuffers[index], display_pixels[index],
+            &s_framebuffers[index], s_display_pixels[index],
             s_physical_width, s_physical_height, PAX_BUF_16_565RGB
         ) ? ESP_OK : ESP_ERR_NO_MEM);
         pax_buf_reversed(&s_framebuffers[index], endianness == BSP_DISPLAY_ENDIAN_BIG);
@@ -651,6 +652,8 @@ void app_main(void) {
     ESP_ERROR_CHECK(bsp_device_initialize(&configuration));
     graphics_initialize();
     ESP_ERROR_CHECK(bsp_input_get_queue(&s_input_queue));
+    sidekick_lvgl_init(s_display_pixels[0], s_display_pixels[1],
+                       s_physical_width, s_physical_height);
     vTaskPrioritySet(NULL, 5);
 
     uar_probe_snapshot_t previous = {0};
@@ -659,7 +662,7 @@ void app_main(void) {
     uint32_t previous_diagnostic_revision = UINT32_MAX;
     uar_probe_snapshot(&previous);
     uar_probe_diagnostics(diagnostics, 6, &diagnostic_revision);
-    render(&previous, diagnostics);
+    sidekick_lvgl_run();
 
     esp_err_t power_error = bsp_power_set_usb_host_boost_enabled(true);
     if (power_error != ESP_OK) {
@@ -676,7 +679,6 @@ void app_main(void) {
         ESP_LOGE(TAG, "USB host start failed: %s", esp_err_to_name(error));
         snprintf(previous.status, sizeof(previous.status), "USB host error: %s",
                  esp_err_to_name(error));
-        render(&previous, diagnostics);
     }
 
     while (true) {
@@ -859,19 +861,44 @@ void app_main(void) {
                 s_peak_hold[channel] = (uint16_t)(((uint32_t)s_peak_hold[channel] * 94) / 100);
             }
         }
-        if (s_ui_page == UI_PAGE_LOOPER) render_transport_fast();
-        else if (s_ui_page == UI_PAGE_LFO) render_lfo_fast();
-        if (memcmp(&current, &previous, sizeof(current)) != 0 ||
-            diagnostic_revision != previous_diagnostic_revision || loop_changed ||
-            s_ui_dirty) {
-            render(&current, diagnostics);
-            previous = current;
-            previous_diagnostic_revision = diagnostic_revision;
-            s_ui_dirty = false;
+        sidekick_ui_state_t ui = {
+            .device_connected = current.connected,
+            .midi_connected = uar_midi_is_connected(),
+            .lfo_page = s_ui_page == UI_PAGE_LFO,
+            .bpm = s_loop_bpm,
+            .bars = s_loop_bars,
+            .loop_state = s_loop_state,
+            .loop_frames = s_loop_frames,
+            .loop_position = s_loop_position,
+            .record_armed = s_record_armed,
+            .overdubbing = s_overdubbing,
+            .metronome = s_metronome,
+            .selected_track = s_selected_track,
+            .lfo_field = s_lfo_field,
+            .lfo_shape = s_lfos[0].shape,
+            .lfo_rate = s_lfos[0].rate,
+            .lfo_relation = s_lfo_relation,
+            .lfo_depth = s_lfos[0].depth,
+            .lfo_center = s_lfos[0].center,
+        };
+        memcpy(ui.track_volumes, s_track_volumes, sizeof(ui.track_volumes));
+        memcpy(ui.track_frames, s_track_frames, sizeof(ui.track_frames));
+        memcpy(ui.track_positions, s_track_positions, sizeof(ui.track_positions));
+        memcpy(ui.track_waveforms, s_track_waveforms, sizeof(ui.track_waveforms));
+        for (uint8_t twin = 0; twin < 2; twin++) {
+            ui.lfo_enabled[twin] = s_lfos[twin].enabled;
+            ui.lfo_channel[twin] = s_lfos[twin].channel;
+            ui.lfo_target[twin] = s_lfos[twin].target;
+            ui.lfo_phase[twin] = s_lfos[twin].phase;
         }
-        // The display driver already gates blits on the previous DMA transfer.
-        // A short yield keeps input responsive and queues the next visual frame
-        // for the earliest panel refresh instead of adding a second frame delay.
-        vTaskDelay(pdMS_TO_TICKS(1));
+        bool full_update = memcmp(&current, &previous, sizeof(current)) != 0 ||
+                           diagnostic_revision != previous_diagnostic_revision ||
+                           loop_changed || s_ui_dirty;
+        sidekick_lvgl_update(&ui, full_update);
+        sidekick_lvgl_run();
+        previous = current;
+        previous_diagnostic_revision = diagnostic_revision;
+        s_ui_dirty = false;
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }

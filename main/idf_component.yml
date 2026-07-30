@@ -2,3 +2,4 @@ dependencies:
   idf: '>=5.5.1'
   badgeteam/badge-bsp: ^0.9.9
   robotman2412/pax-gfx: ^2.1.0
+  lvgl/lvgl: ^9.3.0
