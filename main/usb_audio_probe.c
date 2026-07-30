@@ -20,6 +20,7 @@
 #define USB_CLASS_AUDIO 0x01
 #define USB_SUBCLASS_AUDIOCONTROL 0x01
 #define USB_SUBCLASS_AUDIOSTREAMING 0x02
+#define USB_SUBCLASS_MIDISTREAMING 0x03
 #define USB_DT_INTERFACE 0x04
 #define USB_DT_ENDPOINT 0x05
 #define USB_DT_CS_INTERFACE 0x24
@@ -37,6 +38,7 @@
 #define MONITOR_FRAMES_PER_BLOCK 256
 #define LOOP_MAX_SECONDS 30
 #define LOOP_MAX_FRAMES (48000 * LOOP_MAX_SECONDS)
+#define MIDI_QUEUE_LENGTH 32
 
 static const char *TAG = "uac_probe";
 static usb_host_client_handle_t s_client;
@@ -87,6 +89,20 @@ static volatile uint32_t s_overdub_frames;
 static volatile uint8_t s_track_volume[4] = {100, 100, 100, 100};
 static uint16_t s_track_waveform[4][UAR_WAVEFORM_BINS];
 static volatile uint8_t s_monitor_volume = 55;
+typedef struct {
+    uint8_t status;
+    uint8_t data1;
+    uint8_t data2;
+    uint8_t length;
+} midi_message_t;
+static QueueHandle_t s_midi_queue;
+static SemaphoreHandle_t s_midi_transfer_done;
+static usb_transfer_t *s_midi_out_transfer;
+static uint8_t s_midi_interface = 0xff;
+static uint8_t s_midi_alt;
+static uint8_t s_midi_out_endpoint;
+static uint16_t s_midi_out_packet_size;
+static volatile bool s_midi_ready;
 static int64_t s_last_tap_us;
 static uint32_t s_tap_intervals[3];
 static uint8_t s_tap_count;
@@ -98,6 +114,67 @@ static void clock_control_done(usb_transfer_t *transfer);
 static esp_err_t set_stream_interface_alt(
     usb_device_handle_t device, uint8_t interface_number, uint8_t alternate_setting
 );
+
+static void midi_transfer_done(usb_transfer_t *transfer) {
+    (void)transfer;
+    if (s_midi_transfer_done != NULL) xSemaphoreGive(s_midi_transfer_done);
+}
+
+static void midi_task(void *argument) {
+    (void)argument;
+    midi_message_t message;
+    while (true) {
+        if (xQueueReceive(s_midi_queue, &message, portMAX_DELAY) != pdTRUE) continue;
+        if (!s_midi_ready || s_midi_out_transfer == NULL) continue;
+        uint8_t cin = (message.status >> 4) & 0x0f;
+        s_midi_out_transfer->data_buffer[0] = cin;
+        s_midi_out_transfer->data_buffer[1] = message.status;
+        s_midi_out_transfer->data_buffer[2] = message.data1;
+        s_midi_out_transfer->data_buffer[3] =
+            message.length >= 3 ? message.data2 : 0;
+        s_midi_out_transfer->num_bytes = 4;
+        xSemaphoreTake(s_midi_transfer_done, 0);
+        esp_err_t error = usb_host_transfer_submit(s_midi_out_transfer);
+        if (error != ESP_OK) {
+            ESP_LOGW(TAG, "MIDI submit failed: %s", esp_err_to_name(error));
+            continue;
+        }
+        if (xSemaphoreTake(s_midi_transfer_done, pdMS_TO_TICKS(250)) != pdTRUE ||
+            s_midi_out_transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+            ESP_LOGW(TAG, "MIDI transfer did not complete");
+        }
+    }
+}
+
+static void midi_enqueue(
+    uint8_t status, uint8_t data1, uint8_t data2, uint8_t length
+) {
+    if (!s_midi_ready || s_midi_queue == NULL) return;
+    midi_message_t message = {status, data1, data2, length};
+    xQueueSend(s_midi_queue, &message, 0);
+}
+
+bool uar_midi_is_connected(void) {
+    return s_midi_ready;
+}
+
+void uar_midi_control_change(uint8_t channel, uint8_t controller, uint8_t value) {
+    if (channel < 1 || channel > 16) return;
+    midi_enqueue(0xb0 | (channel - 1), controller & 0x7f, value & 0x7f, 3);
+}
+
+void uar_midi_program_change(uint8_t channel, uint8_t program) {
+    if (channel < 1 || channel > 16) return;
+    midi_enqueue(0xc0 | (channel - 1), program & 0x7f, 0, 2);
+}
+
+void uar_midi_pitch_bend(uint8_t channel, int16_t bend) {
+    if (channel < 1 || channel > 16) return;
+    int32_t value = (int32_t)bend + 8192;
+    if (value < 0) value = 0;
+    if (value > 16383) value = 16383;
+    midi_enqueue(0xe0 | (channel - 1), value & 0x7f, (value >> 7) & 0x7f, 3);
+}
 
 static const char *transfer_status_name(usb_transfer_status_t status) {
     switch (status) {
@@ -607,6 +684,33 @@ static esp_err_t start_meter_stream(
     return ESP_OK;
 }
 
+static esp_err_t start_midi_stream(usb_device_handle_t device) {
+    if (s_midi_interface == 0xff || s_midi_out_endpoint == 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    esp_err_t error = usb_host_interface_claim(
+        s_client, device, s_midi_interface, s_midi_alt
+    );
+    if (error != ESP_OK) return error;
+    size_t transfer_size = s_midi_out_packet_size;
+    if (transfer_size < 4) transfer_size = 4;
+    error = usb_host_transfer_alloc(transfer_size, 0, &s_midi_out_transfer);
+    if (error != ESP_OK) {
+        usb_host_interface_release(s_client, device, s_midi_interface);
+        return error;
+    }
+    s_midi_out_transfer->device_handle = device;
+    s_midi_out_transfer->bEndpointAddress = s_midi_out_endpoint;
+    s_midi_out_transfer->callback = midi_transfer_done;
+    s_midi_out_transfer->context = NULL;
+    s_midi_out_transfer->timeout_ms = 250;
+    s_midi_ready = true;
+    ESP_LOGI(TAG, "MIDI ready: if%u alt%u ep%02x packet %u",
+             s_midi_interface, s_midi_alt, s_midi_out_endpoint,
+             s_midi_out_packet_size);
+    return ESP_OK;
+}
+
 static void clock_control_done(usb_transfer_t *transfer) {
     (void)transfer;
     if (s_control_done != NULL) xSemaphoreGive(s_control_done);
@@ -660,6 +764,10 @@ static void stream_start_task(void *argument) {
             vTaskDelete(NULL);
             return;
         }
+    }
+    esp_err_t midi_error = start_midi_stream(device);
+    if (midi_error != ESP_OK) {
+        ESP_LOGW(TAG, "MIDI stream unavailable: %s", esp_err_to_name(midi_error));
     }
     uar_probe_snapshot_t result;
     uar_probe_snapshot(&result);
@@ -735,6 +843,10 @@ static bool parse_audio_configuration(
     s_audio_control_interface = 0;
     s_clock_source_id = 0;
     memset(s_clock_controls, 0, sizeof(s_clock_controls));
+    s_midi_interface = 0xff;
+    s_midi_alt = 0;
+    s_midi_out_endpoint = 0;
+    s_midi_out_packet_size = 0;
 
     ESP_LOGI(TAG, "Configuration: %u interfaces, %u bytes",
              configuration->bNumInterfaces, configuration->wTotalLength);
@@ -764,6 +876,10 @@ static bool parse_audio_configuration(
                 if (descriptor[7] == 0x20) result->audio_class_2 = true;
                 if (interface_subclass == USB_SUBCLASS_AUDIOCONTROL) {
                     s_audio_control_interface = interface_number;
+                }
+                if (interface_subclass == USB_SUBCLASS_MIDISTREAMING) {
+                    s_midi_interface = interface_number;
+                    s_midi_alt = alternate_setting;
                 }
             }
         } else if (type == USB_DT_CS_INTERFACE && interface_class == USB_CLASS_AUDIO) {
@@ -843,6 +959,16 @@ static bool parse_audio_configuration(
                            attributes, le16(descriptor + 4), descriptor[6],
                            channels, subslot, resolution, stream_clock_source,
                            feedback_in_alt);
+            }
+            if (interface_class == USB_CLASS_AUDIO &&
+                interface_subclass == USB_SUBCLASS_MIDISTREAMING &&
+                (attributes & 0x03) == 2 && (endpoint & 0x80) == 0) {
+                s_midi_interface = interface_number;
+                s_midi_alt = alternate_setting;
+                s_midi_out_endpoint = endpoint;
+                s_midi_out_packet_size = le16(descriptor + 4) & 0x07ff;
+                ESP_LOGI(TAG, "MIDI OUT endpoint %02x on interface %u",
+                         endpoint, interface_number);
             }
         } else {
             ESP_LOGI(TAG, "Descriptor type %02x len %u", type, length);
@@ -945,6 +1071,10 @@ static void handle_new_device(uint8_t address) {
 static void handle_device_gone(usb_device_handle_t device) {
     if (device != s_device) return;
     s_streaming = false;
+    s_midi_ready = false;
+    if (s_midi_interface != 0xff) {
+        usb_host_interface_release(s_client, s_device, s_midi_interface);
+    }
     if (s_stream_interface != 0 || s_stream_alt != 0) {
         usb_host_interface_release(s_client, s_device, s_stream_interface);
     }
@@ -1172,10 +1302,14 @@ esp_err_t uar_probe_start(void) {
     if (s_control_done == NULL) return ESP_ERR_NO_MEM;
     s_iso_resubmit_queue = xQueueCreate(ISO_TRANSFER_COUNT * 2, sizeof(usb_transfer_t *));
     if (s_iso_resubmit_queue == NULL) return ESP_ERR_NO_MEM;
+    s_midi_queue = xQueueCreate(MIDI_QUEUE_LENGTH, sizeof(midi_message_t));
+    s_midi_transfer_done = xSemaphoreCreateBinary();
+    if (s_midi_queue == NULL || s_midi_transfer_done == NULL) return ESP_ERR_NO_MEM;
     if (xTaskCreate(library_task, "uac_host", 4096, NULL, 20, NULL) != pdPASS ||
         xTaskCreate(client_task, "uac_probe", 6144, NULL, 20, NULL) != pdPASS ||
         xTaskCreate(iso_resubmit_task, "uac_iso", 4096, NULL, 21, NULL) != pdPASS ||
-        xTaskCreate(monitor_task, "uac_monitor", 4096, NULL, 22, NULL) != pdPASS) {
+        xTaskCreate(monitor_task, "uac_monitor", 4096, NULL, 22, NULL) != pdPASS ||
+        xTaskCreate(midi_task, "uac_midi", 3072, NULL, 18, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;

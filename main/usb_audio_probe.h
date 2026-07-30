@@ -72,3 +72,7 @@ void uar_loop_adjust_track_volume(int delta);
 void uar_loop_get_track_volumes(uint8_t volumes[4]);
 void uar_loop_get_waveforms(uint16_t waveforms[4][UAR_WAVEFORM_BINS]);
 void uar_monitor_adjust_volume(int delta);
+bool uar_midi_is_connected(void);
+void uar_midi_control_change(uint8_t channel, uint8_t controller, uint8_t value);
+void uar_midi_program_change(uint8_t channel, uint8_t program);
+void uar_midi_pitch_bend(uint8_t channel, int16_t bend);
