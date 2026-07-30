@@ -74,10 +74,11 @@ typedef enum {
 static ui_page_t s_ui_page;
 static bool s_ui_dirty;
 typedef enum {
-    LFO_FIELD_ENABLED,
-    LFO_FIELD_BINDING,
+    LFO_FIELD_BIND_A,
+    LFO_FIELD_BIND_B,
     LFO_FIELD_SHAPE,
     LFO_FIELD_RATE,
+    LFO_FIELD_RELATION,
     LFO_FIELD_DEPTH,
     LFO_FIELD_CENTER,
     LFO_FIELD_COUNT,
@@ -94,16 +95,22 @@ typedef struct {
     int16_t last_value;
 } midi_lfo_t;
 #define LFO_TARGET_COUNT 3
-#define LFO_BINDING_COUNT 6
+#define LFO_BINDING_COUNT 7
 #define LFO_SHAPE_COUNT 6
 #define LFO_RATE_COUNT 13
-static midi_lfo_t s_lfo = {
-    .channel = 0, .target = 1, .shape = 0, .rate = 9,
-    .depth = 64, .center = 64, .last_value = -1
+#define LFO_RELATION_COUNT 8
+static midi_lfo_t s_lfos[2] = {
+    {.enabled = true, .channel = 0, .target = 1, .shape = 0, .rate = 9,
+     .depth = 64, .center = 64, .last_value = -1},
+    {.enabled = false, .channel = 1, .target = 1, .shape = 0, .rate = 9,
+     .depth = 64, .center = 64, .last_value = -1}
 };
+static uint8_t s_lfo_relation;
 static uint8_t s_lfo_field;
 static int64_t s_lfo_previous_tick_us;
-static int16_t s_lfo_previous_cursor[2] = {-1, -1};
+static int16_t s_lfo_previous_cursor[2][2] = {
+    {-1, -1}, {-1, -1}
+};
 static const char *const s_lfo_target_names[LFO_TARGET_COUNT] = {
     "VOLUME", "EFFECT AMOUNT", "EFFECT MOVEMENT"
 };
@@ -116,6 +123,12 @@ static const char *const s_lfo_shape_names[LFO_SHAPE_COUNT] = {
 static const char *const s_lfo_rate_names[LFO_RATE_COUNT] = {
     "0.10 Hz", "0.25 Hz", "0.50 Hz", "1.00 Hz", "2.00 Hz", "4.00 Hz", "8.00 Hz",
     "1/16", "1/8", "1/4", "1/2", "1 BAR", "2 BAR"
+};
+static const char *const s_lfo_relation_names[LFO_RELATION_COUNT] = {
+    "SAME", "INVERTED", "B ×2", "B ×3", "B ×4", "B ÷2", "B ÷3", "B ÷4"
+};
+static const float s_lfo_relation_ratios[LFO_RELATION_COUNT] = {
+    1.0f, 1.0f, 2.0f, 3.0f, 4.0f, 0.5f, 1.0f / 3.0f, 0.25f
 };
 static void text(float x, float y, float size, pax_col_t color, const char *value) {
     pax_draw_text(&s_framebuffer, color, pax_font_sky_mono, size, x, y, value);
@@ -163,15 +176,16 @@ static float lfo_visual_value(uint8_t shape, float phase) {
     }
 }
 
-static void draw_lfo_curve_column(pax_buf_t *target, int x) {
+static void draw_lfo_curve_column(pax_buf_t *target, uint8_t twin, int x) {
     const int graph_x = 42;
-    const int graph_y = 145;
     const int graph_w = 716;
-    const int graph_h = 120;
+    const int graph_y = 148 + twin * 78;
+    const int graph_h = 68;
     if (x < graph_x || x >= graph_x + graph_w) return;
     float phase = (float)(x - graph_x) / graph_w;
-    float wave = lfo_visual_value(s_lfo.shape, phase);
-    int y = graph_y + graph_h / 2 - (int)(wave * 48.0f);
+    float wave = lfo_visual_value(s_lfos[0].shape, phase);
+    if (twin == 1 && s_lfo_relation == 1) wave = -wave;
+    int y = graph_y + graph_h / 2 - (int)(wave * 26.0f);
     pax_draw_rect(target, COLOR_GOOD, x, y - 1, 1, 3);
 }
 
@@ -179,24 +193,30 @@ static void render_lfo_fast(void) {
     pax_buf_t *target = &s_framebuffers[s_framebuffer_index ^ 1];
     unsigned displayed = s_framebuffer_index ^ 1;
     const int graph_x = 42;
-    const int graph_y = 145;
     const int graph_w = 716;
-    const int graph_h = 120;
-    int previous = s_lfo_previous_cursor[displayed];
-    if (previous >= graph_x) {
-        pax_draw_rect(target, 0xff080909, previous - 6, graph_y, 13, graph_h);
-        pax_draw_rect(target, COLOR_DIM, previous - 6,
-                      graph_y + graph_h / 2, 13, 1);
-        for (int x = previous - 6; x <= previous + 6; x++) {
-            draw_lfo_curve_column(target, x);
+    const int graph_h = 68;
+    for (uint8_t twin = 0; twin < 2; twin++) {
+        const int graph_y = 148 + twin * 78;
+        int previous = s_lfo_previous_cursor[displayed][twin];
+        if (previous >= graph_x) {
+            pax_draw_rect(target, 0xff080909, previous - 6, graph_y, 13, graph_h);
+            pax_draw_rect(target, COLOR_DIM, previous - 6,
+                          graph_y + graph_h / 2, 13, 1);
+            for (int x = previous - 6; x <= previous + 6; x++) {
+                draw_lfo_curve_column(target, twin, x);
+            }
         }
+        midi_lfo_t *lfo = &s_lfos[twin];
+        int cursor = graph_x + (int)(lfo->phase * (graph_w - 1));
+        float wave = lfo_visual_value(s_lfos[0].shape, lfo->phase);
+        if (twin == 1 && s_lfo_relation == 1) wave = -wave;
+        int point_y = graph_y + graph_h / 2 - (int)(wave * 26.0f);
+        pax_draw_rect(target, twin ? COLOR_TEXT : COLOR_ACCENT,
+                      cursor, graph_y, 2, graph_h);
+        pax_draw_circle(target, twin ? COLOR_ACCENT : COLOR_TEXT,
+                        cursor + 1, point_y, 4);
+        s_lfo_previous_cursor[displayed][twin] = cursor;
     }
-    int cursor = graph_x + (int)(s_lfo.phase * (graph_w - 1));
-    float wave = lfo_visual_value(s_lfo.shape, s_lfo.phase);
-    int point_y = graph_y + graph_h / 2 - (int)(wave * 48.0f);
-    pax_draw_rect(target, COLOR_ACCENT, cursor, graph_y, 2, graph_h);
-    pax_draw_circle(target, COLOR_TEXT, cursor + 1, point_y, 5);
-    s_lfo_previous_cursor[displayed] = cursor;
 }
 
 static void lfo_tick(void) {
@@ -210,55 +230,76 @@ static void lfo_tick(void) {
     s_lfo_previous_tick_us = now;
     float dt = elapsed / 1000000.0f;
     if (dt > 0.1f) dt = 0.1f;
-    midi_lfo_t *lfo = &s_lfo;
-    if (!lfo->enabled) return;
-    lfo->phase += lfo_frequency(lfo->rate) * dt;
-    lfo->phase -= floorf(lfo->phase);
-    float wave = lfo_shape_value(lfo);
-    int value = (int)lroundf(lfo->center + wave * lfo->depth * 0.5f);
-    if (value < 0) value = 0;
-    if (value > 127) value = 127;
-    if (value == lfo->last_value) return;
-    lfo->last_value = value;
-    uint8_t channel = lfo->channel + 1;
-    if (lfo->target == 2) {
-        uar_midi_pitch_bend(channel, (int16_t)(value * 129 - 8192));
-    } else {
-        uar_midi_control_change(channel, s_lfo_target_cc[lfo->target], value);
+    float base_frequency = lfo_frequency(s_lfos[0].rate);
+    for (uint8_t twin = 0; twin < 2; twin++) {
+        midi_lfo_t *lfo = &s_lfos[twin];
+        float ratio = twin ? s_lfo_relation_ratios[s_lfo_relation] : 1.0f;
+        lfo->phase += base_frequency * ratio * dt;
+        lfo->phase -= floorf(lfo->phase);
+        if (!lfo->enabled) continue;
+        float wave = lfo_shape_value(lfo);
+        if (twin == 1 && s_lfo_relation == 1) wave = -wave;
+        int value = (int)lroundf(lfo->center + wave * lfo->depth * 0.5f);
+        if (value < 0) value = 0;
+        if (value > 127) value = 127;
+        if (value == lfo->last_value) continue;
+        lfo->last_value = value;
+        uint8_t channel = lfo->channel + 1;
+        if (lfo->target == 2) {
+            uar_midi_pitch_bend(channel, (int16_t)(value * 129 - 8192));
+        } else {
+            uar_midi_control_change(channel, s_lfo_target_cc[lfo->target], value);
+        }
+    }
+}
+
+static void lfo_adjust_binding(midi_lfo_t *lfo, int direction) {
+    int binding = lfo->enabled ?
+        1 + lfo->channel * LFO_TARGET_COUNT + lfo->target : 0;
+    binding = (binding + LFO_BINDING_COUNT +
+               (direction > 0 ? 1 : -1)) % LFO_BINDING_COUNT;
+    lfo->enabled = binding != 0;
+    if (lfo->enabled) {
+        binding--;
+        lfo->channel = binding / LFO_TARGET_COUNT;
+        lfo->target = binding % LFO_TARGET_COUNT;
+        lfo->last_value = -1;
     }
 }
 
 static void lfo_adjust_selected(int direction) {
-    midi_lfo_t *lfo = &s_lfo;
+    midi_lfo_t *lfo = &s_lfos[0];
     switch (s_lfo_field) {
-        case LFO_FIELD_ENABLED:
-            lfo->enabled = !lfo->enabled;
-            lfo->last_value = -1;
+        case LFO_FIELD_BIND_A:
+            lfo_adjust_binding(&s_lfos[0], direction);
             break;
-        case LFO_FIELD_BINDING: {
-            int binding = lfo->channel * LFO_TARGET_COUNT + lfo->target;
-            binding =
-                (binding + LFO_BINDING_COUNT + (direction > 0 ? 1 : -1)) %
-                LFO_BINDING_COUNT;
-            lfo->channel = binding / LFO_TARGET_COUNT;
-            lfo->target = binding % LFO_TARGET_COUNT;
+        case LFO_FIELD_BIND_B:
+            lfo_adjust_binding(&s_lfos[1], direction);
             break;
-        }
         case LFO_FIELD_SHAPE:
             lfo->shape =
                 (lfo->shape + LFO_SHAPE_COUNT + (direction > 0 ? 1 : -1)) %
                 LFO_SHAPE_COUNT;
+            s_lfos[1].shape = lfo->shape;
             break;
         case LFO_FIELD_RATE:
             lfo->rate =
                 (lfo->rate + LFO_RATE_COUNT + (direction > 0 ? 1 : -1)) %
                 LFO_RATE_COUNT;
+            s_lfos[1].rate = lfo->rate;
+            break;
+        case LFO_FIELD_RELATION:
+            s_lfo_relation =
+                (s_lfo_relation + LFO_RELATION_COUNT +
+                 (direction > 0 ? 1 : -1)) % LFO_RELATION_COUNT;
+            s_lfos[1].phase = s_lfos[0].phase;
             break;
         case LFO_FIELD_DEPTH: {
             int value = lfo->depth + direction * 4;
             if (value < 0) value = 0;
             if (value > 127) value = 127;
             lfo->depth = value;
+            s_lfos[1].depth = lfo->depth;
             break;
         }
         case LFO_FIELD_CENTER: {
@@ -266,6 +307,7 @@ static void lfo_adjust_selected(int direction) {
             if (value < 0) value = 0;
             if (value > 127) value = 127;
             lfo->center = value;
+            s_lfos[1].center = lfo->center;
             break;
         }
         default: break;
@@ -274,46 +316,69 @@ static void lfo_adjust_selected(int direction) {
 }
 
 static void render_lfo_panel(void) {
-    pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 103, s_width - 40, 302, 5);
-    pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, 103, 8, 302);
-    text(42, 115, 14, COLOR_ACCENT, "MIDI LFO");
-    char binding[64];
-    snprintf(binding, sizeof(binding), "%s · CHANNEL %u",
-             s_lfo_target_names[s_lfo.target], s_lfo.channel + 1);
-    text(150, 113, 18, COLOR_TEXT, binding);
-    text(660, 115, 14, s_lfo.enabled ? COLOR_GOOD : COLOR_DIM,
-         s_lfo.enabled ? "● ACTIVE" : "○ OFF");
+    pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 103, s_width - 40, 357, 5);
+    pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, 103, 8, 357);
+    text(42, 115, 14, COLOR_ACCENT, "TWIN LFO");
+    text(150, 112, 18, COLOR_TEXT, s_lfo_relation_names[s_lfo_relation]);
 
-    pax_draw_rect(&s_framebuffer, 0xff080909, 42, 145, 716, 120);
-    pax_draw_rect(&s_framebuffer, COLOR_DIM, 42, 205, 716, 1);
-    for (int x = 42; x < 758; x++) draw_lfo_curve_column(&s_framebuffer, x);
-    int cursor = 42 + (int)(s_lfo.phase * 715);
-    float current_wave = lfo_visual_value(s_lfo.shape, s_lfo.phase);
-    int point_y = 205 - (int)(current_wave * 48.0f);
-    pax_draw_rect(&s_framebuffer, COLOR_ACCENT, cursor, 145, 2, 120);
-    pax_draw_circle(&s_framebuffer, COLOR_TEXT, cursor + 1, point_y, 5);
-    s_lfo_previous_cursor[s_framebuffer_index] = cursor;
+    for (uint8_t twin = 0; twin < 2; twin++) {
+        midi_lfo_t *current = &s_lfos[twin];
+        int graph_y = 148 + twin * 78;
+        char label[72];
+        if (current->enabled) {
+            snprintf(label, sizeof(label), "%c  %s · CHANNEL %u",
+                     'A' + twin, s_lfo_target_names[current->target],
+                     current->channel + 1);
+        } else {
+            snprintf(label, sizeof(label), "%c  OFF", 'A' + twin);
+        }
+        text(42, graph_y - 18, 13,
+             current->enabled ? (twin ? COLOR_TEXT : COLOR_ACCENT) : COLOR_DIM,
+             label);
+        pax_draw_rect(&s_framebuffer, 0xff080909, 42, graph_y, 716, 68);
+        pax_draw_rect(&s_framebuffer, COLOR_DIM, 42, graph_y + 34, 716, 1);
+        for (int x = 42; x < 758; x++) {
+            draw_lfo_curve_column(&s_framebuffer, twin, x);
+        }
+        int cursor = 42 + (int)(current->phase * 715);
+        float wave = lfo_visual_value(s_lfos[0].shape, current->phase);
+        if (twin == 1 && s_lfo_relation == 1) wave = -wave;
+        int point_y = graph_y + 34 - (int)(wave * 26.0f);
+        pax_draw_rect(&s_framebuffer, twin ? COLOR_TEXT : COLOR_ACCENT,
+                      cursor, graph_y, 2, 68);
+        pax_draw_circle(&s_framebuffer, twin ? COLOR_ACCENT : COLOR_TEXT,
+                        cursor + 1, point_y, 4);
+        s_lfo_previous_cursor[s_framebuffer_index][twin] = cursor;
+    }
 
-    midi_lfo_t *lfo = &s_lfo;
+    midi_lfo_t *lfo = &s_lfos[0];
     static const char *const field_names[LFO_FIELD_COUNT] = {
-        "ACTIVE", "BIND TO", "SHAPE", "RATE", "AMOUNT", "CENTER"
+        "BIND A", "BIND B", "SHAPE", "RATE", "TWIN MODE", "AMOUNT", "CENTER"
     };
     for (uint8_t field = 0; field < LFO_FIELD_COUNT; field++) {
-        uint8_t column = field / 3;
-        uint8_t row = field % 3;
-        float x = 42 + column * 375;
-        float y = 292 + row * 32;
+        uint8_t column = field % 3;
+        uint8_t row = field / 3;
+        float x = 42 + column * 240;
+        float y = 327 + row * 38;
         bool selected = field == s_lfo_field;
-        if (selected) pax_draw_rect(&s_framebuffer, COLOR_ACCENT, x, y - 5, 340, 27);
+        if (selected) pax_draw_rect(&s_framebuffer, COLOR_ACCENT, x, y - 5, 220, 29);
         text(x + 10, y, 13, selected ? COLOR_TEXT : COLOR_DIM, field_names[field]);
-        char value[32];
+        char value[48];
         switch (field) {
-            case LFO_FIELD_ENABLED:
-                snprintf(value, sizeof(value), "%s", lfo->enabled ? "ON" : "OFF");
+            case LFO_FIELD_BIND_A:
+            case LFO_FIELD_BIND_B: {
+                midi_lfo_t *bound = &s_lfos[field == LFO_FIELD_BIND_B];
+                if (bound->enabled) {
+                    snprintf(value, sizeof(value), "%s CH%u",
+                             s_lfo_target_names[bound->target], bound->channel + 1);
+                } else {
+                    snprintf(value, sizeof(value), "OFF");
+                }
                 break;
-            case LFO_FIELD_BINDING:
-                snprintf(value, sizeof(value), "%s · CHANNEL %u",
-                         s_lfo_target_names[lfo->target], lfo->channel + 1);
+            }
+            case LFO_FIELD_RELATION:
+                snprintf(value, sizeof(value), "%s",
+                         s_lfo_relation_names[s_lfo_relation]);
                 break;
             case LFO_FIELD_SHAPE:
                 snprintf(value, sizeof(value), "%s", s_lfo_shape_names[lfo->shape]);
@@ -328,7 +393,7 @@ static void render_lfo_panel(void) {
                 snprintf(value, sizeof(value), "%u", lfo->center);
                 break;
         }
-        text(x + 125, y, 13, COLOR_TEXT, value);
+        text(x + 10, y + 16, 11, COLOR_TEXT, value);
     }
 }
 
@@ -529,20 +594,6 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
 
     }
 
-    pax_draw_rect(&s_framebuffer, COLOR_DARK, 0, s_height - 55, s_width, 55);
-    if (s_ui_page == UI_PAGE_LFO) {
-        pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, s_height - 55, 110, 55);
-        text(34, s_height - 42, 15, COLOR_TEXT, "MIDI LFO");
-        text(34, s_height - 23, 12, COLOR_TEXT, "TAB: LOOPER");
-        text(148, s_height - 38, 13, COLOR_TEXT,
-             "↑↓ FIELD   ←→ VALUE   ENTER ON/OFF   TAB LOOPER   F1 EXIT");
-    } else {
-        pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, s_height - 55, 92, 55);
-        text(34, s_height - 42, 15, COLOR_TEXT, "F2 REC");
-        text(34, s_height - 23, 12, COLOR_TEXT, "/ OVERDUB");
-        text(132, s_height - 38, 13, COLOR_TEXT,
-            "↑↓ LOOP VOL   B+↑↓ BPM   ←→ BARS   1-4 TRACK   TAB LFO   F1 EXIT");
-    }
     s_ui_draw_ms = (uint32_t)((esp_timer_get_time() - draw_started + 500) / 1000);
     int64_t present_started = esp_timer_get_time();
     bsp_display_blit(0, 0, s_physical_width, s_physical_height,
@@ -712,13 +763,6 @@ void app_main(void) {
             } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
                        event.args_keyboard.ascii == '\t') {
                 s_ui_page = (ui_page_t)((s_ui_page + 1) % 2);
-                s_ui_dirty = true;
-            } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
-                       s_ui_page == UI_PAGE_LFO &&
-                       (event.args_keyboard.ascii == '\r' ||
-                        event.args_keyboard.ascii == '\n')) {
-                s_lfo.enabled = !s_lfo.enabled;
-                s_lfo.last_value = -1;
                 s_ui_dirty = true;
             } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
                        s_ui_page == UI_PAGE_LOOPER &&
