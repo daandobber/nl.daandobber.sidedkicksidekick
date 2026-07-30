@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -9,6 +10,7 @@
 #include "esp_err.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -68,6 +70,7 @@ static uint16_t s_previous_beat[2] = {UINT16_MAX, UINT16_MAX};
 typedef enum {
     UI_PAGE_LOOPER,
     UI_PAGE_MIDI,
+    UI_PAGE_LFO,
 } ui_page_t;
 typedef enum {
     MIDI_FADER,
@@ -92,6 +95,54 @@ static uint8_t s_midi_values[2][MIDI_PARAMETER_COUNT] = {
     {100, 100, 64, 64, 64, 64, 0, 0, 0, 1, 64, 0},
 };
 static bool s_ui_dirty;
+typedef enum {
+    LFO_FIELD_ENABLED,
+    LFO_FIELD_CHANNEL,
+    LFO_FIELD_TARGET,
+    LFO_FIELD_SHAPE,
+    LFO_FIELD_RATE,
+    LFO_FIELD_DEPTH,
+    LFO_FIELD_CENTER,
+    LFO_FIELD_COUNT,
+} lfo_field_t;
+typedef struct {
+    bool enabled;
+    uint8_t channel;
+    uint8_t target;
+    uint8_t shape;
+    uint8_t rate;
+    uint8_t depth;
+    uint8_t center;
+    float phase;
+    int16_t last_value;
+} midi_lfo_t;
+#define LFO_COUNT 4
+#define LFO_TARGET_COUNT 10
+#define LFO_SHAPE_COUNT 6
+#define LFO_RATE_COUNT 13
+static midi_lfo_t s_lfos[LFO_COUNT] = {
+    {.channel = 0, .target = 8, .shape = 0, .rate = 9, .depth = 64, .center = 64, .last_value = -1},
+    {.channel = 0, .target = 2, .shape = 1, .rate = 10, .depth = 48, .center = 64, .last_value = -1},
+    {.channel = 1, .target = 3, .shape = 0, .rate = 11, .depth = 40, .center = 64, .last_value = -1},
+    {.channel = 1, .target = 9, .shape = 4, .rate = 8, .depth = 96, .center = 64, .last_value = -1},
+};
+static uint8_t s_lfo_selected;
+static uint8_t s_lfo_field;
+static int64_t s_lfo_previous_tick_us;
+static const char *const s_lfo_target_names[LFO_TARGET_COUNT] = {
+    "FADER", "GAIN", "PAN", "EQ HIGH", "EQ MID", "EQ LOW",
+    "COMPRESSION", "SATURATION", "FX AMOUNT", "FX PARAM"
+};
+static const uint8_t s_lfo_target_cc[LFO_TARGET_COUNT] = {
+    7, 20, 10, 22, 23, 24, 12, 13, 1, 0
+};
+static const char *const s_lfo_shape_names[LFO_SHAPE_COUNT] = {
+    "SINE", "TRIANGLE", "SAW UP", "SAW DOWN", "SQUARE", "RANDOM"
+};
+static const char *const s_lfo_rate_names[LFO_RATE_COUNT] = {
+    "0.10 Hz", "0.25 Hz", "0.50 Hz", "1.00 Hz", "2.00 Hz", "4.00 Hz", "8.00 Hz",
+    "1/16", "1/8", "1/4", "1/2", "1 BAR", "2 BAR"
+};
 static const char *const s_midi_parameter_names[MIDI_PARAMETER_COUNT] = {
     "FADER", "GAIN", "PAN", "EQ HIGH", "EQ MID", "EQ LOW",
     "COMPRESSION", "SATURATION", "FX AMOUNT", "FX TYPE",
@@ -138,6 +189,110 @@ static void midi_adjust_selected(int delta) {
     s_ui_dirty = true;
 }
 
+static float lfo_frequency(uint8_t rate) {
+    static const float free_rates[] = {0.10f, 0.25f, 0.50f, 1.0f, 2.0f, 4.0f, 8.0f};
+    if (rate < 7) return free_rates[rate];
+    float beats_per_second = s_loop_bpm / 60.0f;
+    switch (rate) {
+        case 7: return beats_per_second * 4.0f;
+        case 8: return beats_per_second * 2.0f;
+        case 9: return beats_per_second;
+        case 10: return beats_per_second * 0.5f;
+        case 11: return beats_per_second * 0.25f;
+        default: return beats_per_second * 0.125f;
+    }
+}
+
+static float lfo_shape_value(midi_lfo_t *lfo) {
+    float phase = lfo->phase;
+    switch (lfo->shape) {
+        case 0: return sinf(phase * 6.2831853f);
+        case 1: return 1.0f - 4.0f * fabsf(phase - 0.5f);
+        case 2: return phase * 2.0f - 1.0f;
+        case 3: return 1.0f - phase * 2.0f;
+        case 4: return phase < 0.5f ? 1.0f : -1.0f;
+        default:
+            return ((int32_t)(esp_random() & 0xffff) - 32768) / 32768.0f;
+    }
+}
+
+static void lfo_tick(void) {
+    int64_t now = esp_timer_get_time();
+    if (s_lfo_previous_tick_us == 0) {
+        s_lfo_previous_tick_us = now;
+        return;
+    }
+    int64_t elapsed = now - s_lfo_previous_tick_us;
+    if (elapsed < 20000) return;
+    s_lfo_previous_tick_us = now;
+    float dt = elapsed / 1000000.0f;
+    if (dt > 0.1f) dt = 0.1f;
+    for (uint8_t slot = 0; slot < LFO_COUNT; slot++) {
+        midi_lfo_t *lfo = &s_lfos[slot];
+        if (!lfo->enabled) continue;
+        lfo->phase += lfo_frequency(lfo->rate) * dt;
+        lfo->phase -= floorf(lfo->phase);
+        float wave = lfo_shape_value(lfo);
+        int value = (int)lroundf(lfo->center + wave * lfo->depth * 0.5f);
+        if (value < 0) value = 0;
+        if (value > 127) value = 127;
+        if (value == lfo->last_value) continue;
+        lfo->last_value = value;
+        uint8_t channel = lfo->channel + 1;
+        if (lfo->target == 9) {
+            uar_midi_pitch_bend(channel, (int16_t)(value * 129 - 8192));
+        } else {
+            uar_midi_control_change(
+                channel, s_lfo_target_cc[lfo->target], value
+            );
+        }
+    }
+}
+
+static void lfo_adjust_selected(int direction) {
+    midi_lfo_t *lfo = &s_lfos[s_lfo_selected];
+    switch (s_lfo_field) {
+        case LFO_FIELD_ENABLED:
+            lfo->enabled = !lfo->enabled;
+            lfo->last_value = -1;
+            break;
+        case LFO_FIELD_CHANNEL:
+            lfo->channel = lfo->channel ? 0 : 1;
+            break;
+        case LFO_FIELD_TARGET:
+            lfo->target =
+                (lfo->target + LFO_TARGET_COUNT + (direction > 0 ? 1 : -1)) %
+                LFO_TARGET_COUNT;
+            break;
+        case LFO_FIELD_SHAPE:
+            lfo->shape =
+                (lfo->shape + LFO_SHAPE_COUNT + (direction > 0 ? 1 : -1)) %
+                LFO_SHAPE_COUNT;
+            break;
+        case LFO_FIELD_RATE:
+            lfo->rate =
+                (lfo->rate + LFO_RATE_COUNT + (direction > 0 ? 1 : -1)) %
+                LFO_RATE_COUNT;
+            break;
+        case LFO_FIELD_DEPTH: {
+            int value = lfo->depth + direction * 4;
+            if (value < 0) value = 0;
+            if (value > 127) value = 127;
+            lfo->depth = value;
+            break;
+        }
+        case LFO_FIELD_CENTER: {
+            int value = lfo->center + direction * 4;
+            if (value < 0) value = 0;
+            if (value > 127) value = 127;
+            lfo->center = value;
+            break;
+        }
+        default: break;
+    }
+    s_ui_dirty = true;
+}
+
 static void render_midi_panel(void) {
     pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 103, s_width - 40, 302, 5);
     pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, 103, 8, 302);
@@ -174,6 +329,60 @@ static void render_midi_panel(void) {
                           x + 135, y + 4, 145.0f * value / 127.0f, 9);
         }
         text(x + 292, y, 14, selected ? COLOR_TEXT : COLOR_DIM, value_text);
+    }
+}
+
+static void render_lfo_panel(void) {
+    pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 103, s_width - 40, 302, 5);
+    pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, 103, 8, 302);
+    text(42, 115, 14, COLOR_ACCENT, "MIDI LFO MODULATORS");
+    for (uint8_t slot = 0; slot < LFO_COUNT; slot++) {
+        float x = 42 + slot * 185;
+        bool selected = slot == s_lfo_selected;
+        pax_draw_rect(&s_framebuffer, selected ? COLOR_ACCENT : COLOR_DARK,
+                      x, 143, 165, 50);
+        char label[32];
+        snprintf(label, sizeof(label), "LFO %u  %s", slot + 1,
+                 s_lfos[slot].enabled ? "ON" : "OFF");
+        text(x + 10, 155, 16, COLOR_TEXT, label);
+        text(x + 10, 176, 11, selected ? COLOR_TEXT : COLOR_DIM,
+             s_lfo_target_names[s_lfos[slot].target]);
+    }
+
+    midi_lfo_t *lfo = &s_lfos[s_lfo_selected];
+    static const char *const field_names[LFO_FIELD_COUNT] = {
+        "ENABLED", "CHANNEL", "TARGET", "SHAPE", "RATE", "DEPTH", "CENTER"
+    };
+    for (uint8_t field = 0; field < LFO_FIELD_COUNT; field++) {
+        float y = 216 + field * 25;
+        bool selected = field == s_lfo_field;
+        if (selected) pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 42, y - 3, 716, 23);
+        text(52, y, 13, selected ? COLOR_TEXT : COLOR_DIM, field_names[field]);
+        char value[32];
+        switch (field) {
+            case LFO_FIELD_ENABLED:
+                snprintf(value, sizeof(value), "%s", lfo->enabled ? "ON" : "OFF");
+                break;
+            case LFO_FIELD_CHANNEL:
+                snprintf(value, sizeof(value), "CH %u", lfo->channel + 1);
+                break;
+            case LFO_FIELD_TARGET:
+                snprintf(value, sizeof(value), "%s", s_lfo_target_names[lfo->target]);
+                break;
+            case LFO_FIELD_SHAPE:
+                snprintf(value, sizeof(value), "%s", s_lfo_shape_names[lfo->shape]);
+                break;
+            case LFO_FIELD_RATE:
+                snprintf(value, sizeof(value), "%s", s_lfo_rate_names[lfo->rate]);
+                break;
+            case LFO_FIELD_DEPTH:
+                snprintf(value, sizeof(value), "%u", lfo->depth);
+                break;
+            default:
+                snprintf(value, sizeof(value), "%u", lfo->center);
+                break;
+        }
+        text(250, y, 13, COLOR_TEXT, value);
     }
 }
 
@@ -286,6 +495,8 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         text(218, 238, 16, COLOR_TEXT, "USB AUDIO  //  48 kHz");
     } else if (s_ui_page == UI_PAGE_MIDI) {
         render_midi_panel();
+    } else if (s_ui_page == UI_PAGE_LFO) {
+        render_lfo_panel();
     } else {
         char line[96];
         static const char *const states[] = {"READY", "RECORDING", "PLAYING", "PAUSED"};
@@ -378,9 +589,15 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
     if (s_ui_page == UI_PAGE_MIDI) {
         pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, s_height - 55, 110, 55);
         text(34, s_height - 42, 15, COLOR_TEXT, "MIDI");
-        text(34, s_height - 23, 12, COLOR_TEXT, "TAB: LOOPER");
+        text(34, s_height - 23, 12, COLOR_TEXT, "TAB: LFO");
         text(148, s_height - 38, 13, COLOR_TEXT,
              "↑↓ PARAM   ←→ VALUE   1/2 CHANNEL   ENTER TOGGLE   F1 EXIT");
+    } else if (s_ui_page == UI_PAGE_LFO) {
+        pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, s_height - 55, 110, 55);
+        text(34, s_height - 42, 15, COLOR_TEXT, "MIDI LFO");
+        text(34, s_height - 23, 12, COLOR_TEXT, "TAB: LOOPER");
+        text(148, s_height - 38, 13, COLOR_TEXT,
+             "1-4 SLOT   ↑↓ FIELD   ←→ VALUE   ENTER TOGGLE   F1 EXIT");
     } else {
         pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, s_height - 55, 92, 55);
         text(34, s_height - 42, 15, COLOR_TEXT, "F2 REC");
@@ -478,6 +695,37 @@ void app_main(void) {
         while (xQueueReceive(s_input_queue, &event, 0) == pdTRUE) {
             if (event.type == INPUT_EVENT_TYPE_NAVIGATION &&
                 event.args_navigation.state) {
+                if (s_ui_page == UI_PAGE_LFO) {
+                    switch (event.args_navigation.key) {
+                        case BSP_INPUT_NAVIGATION_KEY_F1:
+                            bsp_device_restart_to_launcher();
+                            break;
+                        case BSP_INPUT_NAVIGATION_KEY_UP:
+                            s_lfo_field =
+                                (s_lfo_field + LFO_FIELD_COUNT - 1) % LFO_FIELD_COUNT;
+                            s_ui_dirty = true;
+                            break;
+                        case BSP_INPUT_NAVIGATION_KEY_DOWN:
+                            s_lfo_field = (s_lfo_field + 1) % LFO_FIELD_COUNT;
+                            s_ui_dirty = true;
+                            break;
+                        case BSP_INPUT_NAVIGATION_KEY_LEFT:
+                            lfo_adjust_selected(-1);
+                            break;
+                        case BSP_INPUT_NAVIGATION_KEY_RIGHT:
+                            lfo_adjust_selected(1);
+                            break;
+                        case BSP_INPUT_NAVIGATION_KEY_VOLUME_UP:
+                            uar_monitor_adjust_volume(5);
+                            break;
+                        case BSP_INPUT_NAVIGATION_KEY_VOLUME_DOWN:
+                            uar_monitor_adjust_volume(-5);
+                            break;
+                        default:
+                            break;
+                    }
+                    continue;
+                }
                 if (s_ui_page == UI_PAGE_MIDI) {
                     switch (event.args_navigation.key) {
                         case BSP_INPUT_NAVIGATION_KEY_F1:
@@ -558,8 +806,21 @@ void app_main(void) {
                 }
             } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
                        event.args_keyboard.ascii == '\t') {
-                s_ui_page = s_ui_page == UI_PAGE_LOOPER ?
-                            UI_PAGE_MIDI : UI_PAGE_LOOPER;
+                s_ui_page = (ui_page_t)((s_ui_page + 1) % 3);
+                s_ui_dirty = true;
+            } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
+                       s_ui_page == UI_PAGE_LFO &&
+                       (event.args_keyboard.ascii == '\r' ||
+                        event.args_keyboard.ascii == '\n')) {
+                s_lfos[s_lfo_selected].enabled =
+                    !s_lfos[s_lfo_selected].enabled;
+                s_lfos[s_lfo_selected].last_value = -1;
+                s_ui_dirty = true;
+            } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
+                       s_ui_page == UI_PAGE_LFO &&
+                       event.args_keyboard.ascii >= '1' &&
+                       event.args_keyboard.ascii <= '4') {
+                s_lfo_selected = event.args_keyboard.ascii - '1';
                 s_ui_dirty = true;
             } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
                        s_ui_page == UI_PAGE_MIDI &&
@@ -593,6 +854,7 @@ void app_main(void) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
+        lfo_tick();
         uar_probe_snapshot_t current;
         uar_probe_snapshot(&current);
         uar_probe_diagnostics(diagnostics, 6, &diagnostic_revision);
