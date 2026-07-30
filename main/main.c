@@ -112,7 +112,7 @@ static int16_t s_lfo_previous_cursor[2][2] = {
     {-1, -1}, {-1, -1}
 };
 static const char *const s_lfo_target_names[LFO_TARGET_COUNT] = {
-    "VOLUME", "EFFECT AMOUNT", "EFFECT MOVEMENT"
+    "VOLUME", "FX Y · FORCE", "FX X · STICK"
 };
 static const uint8_t s_lfo_target_cc[LFO_TARGET_COUNT] = {
     7, 1, 0
