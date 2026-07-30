@@ -75,8 +75,7 @@ static ui_page_t s_ui_page;
 static bool s_ui_dirty;
 typedef enum {
     LFO_FIELD_ENABLED,
-    LFO_FIELD_CHANNEL,
-    LFO_FIELD_TARGET,
+    LFO_FIELD_BINDING,
     LFO_FIELD_SHAPE,
     LFO_FIELD_RATE,
     LFO_FIELD_DEPTH,
@@ -94,19 +93,17 @@ typedef struct {
     float phase;
     int16_t last_value;
 } midi_lfo_t;
-#define LFO_COUNT 4
 #define LFO_TARGET_COUNT 3
+#define LFO_BINDING_COUNT 6
 #define LFO_SHAPE_COUNT 6
 #define LFO_RATE_COUNT 13
-static midi_lfo_t s_lfos[LFO_COUNT] = {
-    {.channel = 0, .target = 0, .shape = 0, .rate = 9, .depth = 64, .center = 96, .last_value = -1},
-    {.channel = 0, .target = 1, .shape = 1, .rate = 10, .depth = 64, .center = 64, .last_value = -1},
-    {.channel = 1, .target = 0, .shape = 0, .rate = 11, .depth = 48, .center = 96, .last_value = -1},
-    {.channel = 1, .target = 2, .shape = 4, .rate = 8, .depth = 96, .center = 64, .last_value = -1},
+static midi_lfo_t s_lfo = {
+    .channel = 0, .target = 1, .shape = 0, .rate = 9,
+    .depth = 64, .center = 64, .last_value = -1
 };
-static uint8_t s_lfo_selected;
 static uint8_t s_lfo_field;
 static int64_t s_lfo_previous_tick_us;
+static int16_t s_lfo_previous_cursor[2] = {-1, -1};
 static const char *const s_lfo_target_names[LFO_TARGET_COUNT] = {
     "VOLUME", "EFFECT AMOUNT", "EFFECT MOVEMENT"
 };
@@ -151,6 +148,57 @@ static float lfo_shape_value(midi_lfo_t *lfo) {
     }
 }
 
+static float lfo_visual_value(uint8_t shape, float phase) {
+    switch (shape) {
+        case 0: return sinf(phase * 6.2831853f);
+        case 1: return 1.0f - 4.0f * fabsf(phase - 0.5f);
+        case 2: return phase * 2.0f - 1.0f;
+        case 3: return 1.0f - phase * 2.0f;
+        case 4: return phase < 0.5f ? 1.0f : -1.0f;
+        default: {
+            uint32_t step = (uint32_t)(phase * 16.0f);
+            uint32_t hash = step * 1103515245u + 12345u;
+            return ((hash >> 16) & 0x7fff) / 16383.5f - 1.0f;
+        }
+    }
+}
+
+static void draw_lfo_curve_column(pax_buf_t *target, int x) {
+    const int graph_x = 42;
+    const int graph_y = 145;
+    const int graph_w = 716;
+    const int graph_h = 120;
+    if (x < graph_x || x >= graph_x + graph_w) return;
+    float phase = (float)(x - graph_x) / graph_w;
+    float wave = lfo_visual_value(s_lfo.shape, phase);
+    int y = graph_y + graph_h / 2 - (int)(wave * 48.0f);
+    pax_draw_rect(target, COLOR_GOOD, x, y - 1, 1, 3);
+}
+
+static void render_lfo_fast(void) {
+    pax_buf_t *target = &s_framebuffers[s_framebuffer_index ^ 1];
+    unsigned displayed = s_framebuffer_index ^ 1;
+    const int graph_x = 42;
+    const int graph_y = 145;
+    const int graph_w = 716;
+    const int graph_h = 120;
+    int previous = s_lfo_previous_cursor[displayed];
+    if (previous >= graph_x) {
+        pax_draw_rect(target, 0xff080909, previous - 6, graph_y, 13, graph_h);
+        pax_draw_rect(target, COLOR_DIM, previous - 6,
+                      graph_y + graph_h / 2, 13, 1);
+        for (int x = previous - 6; x <= previous + 6; x++) {
+            draw_lfo_curve_column(target, x);
+        }
+    }
+    int cursor = graph_x + (int)(s_lfo.phase * (graph_w - 1));
+    float wave = lfo_visual_value(s_lfo.shape, s_lfo.phase);
+    int point_y = graph_y + graph_h / 2 - (int)(wave * 48.0f);
+    pax_draw_rect(target, COLOR_ACCENT, cursor, graph_y, 2, graph_h);
+    pax_draw_circle(target, COLOR_TEXT, cursor + 1, point_y, 5);
+    s_lfo_previous_cursor[displayed] = cursor;
+}
+
 static void lfo_tick(void) {
     int64_t now = esp_timer_get_time();
     if (s_lfo_previous_tick_us == 0) {
@@ -162,43 +210,40 @@ static void lfo_tick(void) {
     s_lfo_previous_tick_us = now;
     float dt = elapsed / 1000000.0f;
     if (dt > 0.1f) dt = 0.1f;
-    for (uint8_t slot = 0; slot < LFO_COUNT; slot++) {
-        midi_lfo_t *lfo = &s_lfos[slot];
-        if (!lfo->enabled) continue;
-        lfo->phase += lfo_frequency(lfo->rate) * dt;
-        lfo->phase -= floorf(lfo->phase);
-        float wave = lfo_shape_value(lfo);
-        int value = (int)lroundf(lfo->center + wave * lfo->depth * 0.5f);
-        if (value < 0) value = 0;
-        if (value > 127) value = 127;
-        if (value == lfo->last_value) continue;
-        lfo->last_value = value;
-        uint8_t channel = lfo->channel + 1;
-        if (lfo->target == 2) {
-            uar_midi_pitch_bend(channel, (int16_t)(value * 129 - 8192));
-        } else {
-            uar_midi_control_change(
-                channel, s_lfo_target_cc[lfo->target], value
-            );
-        }
+    midi_lfo_t *lfo = &s_lfo;
+    if (!lfo->enabled) return;
+    lfo->phase += lfo_frequency(lfo->rate) * dt;
+    lfo->phase -= floorf(lfo->phase);
+    float wave = lfo_shape_value(lfo);
+    int value = (int)lroundf(lfo->center + wave * lfo->depth * 0.5f);
+    if (value < 0) value = 0;
+    if (value > 127) value = 127;
+    if (value == lfo->last_value) return;
+    lfo->last_value = value;
+    uint8_t channel = lfo->channel + 1;
+    if (lfo->target == 2) {
+        uar_midi_pitch_bend(channel, (int16_t)(value * 129 - 8192));
+    } else {
+        uar_midi_control_change(channel, s_lfo_target_cc[lfo->target], value);
     }
 }
 
 static void lfo_adjust_selected(int direction) {
-    midi_lfo_t *lfo = &s_lfos[s_lfo_selected];
+    midi_lfo_t *lfo = &s_lfo;
     switch (s_lfo_field) {
         case LFO_FIELD_ENABLED:
             lfo->enabled = !lfo->enabled;
             lfo->last_value = -1;
             break;
-        case LFO_FIELD_CHANNEL:
-            lfo->channel = lfo->channel ? 0 : 1;
+        case LFO_FIELD_BINDING: {
+            int binding = lfo->channel * LFO_TARGET_COUNT + lfo->target;
+            binding =
+                (binding + LFO_BINDING_COUNT + (direction > 0 ? 1 : -1)) %
+                LFO_BINDING_COUNT;
+            lfo->channel = binding / LFO_TARGET_COUNT;
+            lfo->target = binding % LFO_TARGET_COUNT;
             break;
-        case LFO_FIELD_TARGET:
-            lfo->target =
-                (lfo->target + LFO_TARGET_COUNT + (direction > 0 ? 1 : -1)) %
-                LFO_TARGET_COUNT;
-            break;
+        }
         case LFO_FIELD_SHAPE:
             lfo->shape =
                 (lfo->shape + LFO_SHAPE_COUNT + (direction > 0 ? 1 : -1)) %
@@ -231,41 +276,42 @@ static void lfo_adjust_selected(int direction) {
 static void render_lfo_panel(void) {
     pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 103, s_width - 40, 302, 5);
     pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, 103, 8, 302);
-    text(42, 115, 14, COLOR_ACCENT, "MIDI LFO MODULATORS");
-    for (uint8_t slot = 0; slot < LFO_COUNT; slot++) {
-        float x = 42 + slot * 185;
-        bool selected = slot == s_lfo_selected;
-        pax_draw_rect(&s_framebuffer, selected ? COLOR_ACCENT : COLOR_DARK,
-                      x, 143, 165, 50);
-        char label[32];
-        snprintf(label, sizeof(label), "LFO %u  %s", slot + 1,
-                 s_lfos[slot].enabled ? "ON" : "OFF");
-        text(x + 10, 155, 16, COLOR_TEXT, label);
-        char destination[36];
-        snprintf(destination, sizeof(destination), "%s · CH %u",
-                 s_lfo_target_names[s_lfos[slot].target],
-                 s_lfos[slot].channel + 1);
-        text(x + 10, 176, 11, selected ? COLOR_TEXT : COLOR_DIM, destination);
-    }
+    text(42, 115, 14, COLOR_ACCENT, "MIDI LFO");
+    char binding[64];
+    snprintf(binding, sizeof(binding), "%s · CHANNEL %u",
+             s_lfo_target_names[s_lfo.target], s_lfo.channel + 1);
+    text(150, 113, 18, COLOR_TEXT, binding);
+    text(660, 115, 14, s_lfo.enabled ? COLOR_GOOD : COLOR_DIM,
+         s_lfo.enabled ? "● ACTIVE" : "○ OFF");
 
-    midi_lfo_t *lfo = &s_lfos[s_lfo_selected];
+    pax_draw_rect(&s_framebuffer, 0xff080909, 42, 145, 716, 120);
+    pax_draw_rect(&s_framebuffer, COLOR_DIM, 42, 205, 716, 1);
+    for (int x = 42; x < 758; x++) draw_lfo_curve_column(&s_framebuffer, x);
+    int cursor = 42 + (int)(s_lfo.phase * 715);
+    float current_wave = lfo_visual_value(s_lfo.shape, s_lfo.phase);
+    int point_y = 205 - (int)(current_wave * 48.0f);
+    pax_draw_rect(&s_framebuffer, COLOR_ACCENT, cursor, 145, 2, 120);
+    pax_draw_circle(&s_framebuffer, COLOR_TEXT, cursor + 1, point_y, 5);
+    s_lfo_previous_cursor[s_framebuffer_index] = cursor;
+
+    midi_lfo_t *lfo = &s_lfo;
     static const char *const field_names[LFO_FIELD_COUNT] = {
-        "ENABLED", "CHANNEL", "TARGET", "SHAPE", "RATE", "DEPTH", "CENTER"
+        "ACTIVE", "BIND TO", "SHAPE", "RATE", "AMOUNT", "CENTER"
     };
     for (uint8_t field = 0; field < LFO_FIELD_COUNT; field++) {
-        float y = 216 + field * 25;
+        uint8_t column = field / 3;
+        uint8_t row = field % 3;
+        float x = 42 + column * 375;
+        float y = 292 + row * 32;
         bool selected = field == s_lfo_field;
-        if (selected) pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 42, y - 3, 716, 23);
-        text(52, y, 13, selected ? COLOR_TEXT : COLOR_DIM, field_names[field]);
+        if (selected) pax_draw_rect(&s_framebuffer, COLOR_ACCENT, x, y - 5, 340, 27);
+        text(x + 10, y, 13, selected ? COLOR_TEXT : COLOR_DIM, field_names[field]);
         char value[32];
         switch (field) {
             case LFO_FIELD_ENABLED:
                 snprintf(value, sizeof(value), "%s", lfo->enabled ? "ON" : "OFF");
                 break;
-            case LFO_FIELD_CHANNEL:
-                snprintf(value, sizeof(value), "CH %u", lfo->channel + 1);
-                break;
-            case LFO_FIELD_TARGET:
+            case LFO_FIELD_BINDING:
                 snprintf(value, sizeof(value), "%s · CHANNEL %u",
                          s_lfo_target_names[lfo->target], lfo->channel + 1);
                 break;
@@ -282,7 +328,7 @@ static void render_lfo_panel(void) {
                 snprintf(value, sizeof(value), "%u", lfo->center);
                 break;
         }
-        text(250, y, 13, COLOR_TEXT, value);
+        text(x + 125, y, 13, COLOR_TEXT, value);
     }
 }
 
@@ -489,7 +535,7 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         text(34, s_height - 42, 15, COLOR_TEXT, "MIDI LFO");
         text(34, s_height - 23, 12, COLOR_TEXT, "TAB: LOOPER");
         text(148, s_height - 38, 13, COLOR_TEXT,
-             "1-4 SLOT   ↑↓ FIELD   ←→ VALUE   ENTER TOGGLE   F1 EXIT");
+             "↑↓ FIELD   ←→ VALUE   ENTER ON/OFF   TAB LOOPER   F1 EXIT");
     } else {
         pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, s_height - 55, 92, 55);
         text(34, s_height - 42, 15, COLOR_TEXT, "F2 REC");
@@ -671,15 +717,8 @@ void app_main(void) {
                        s_ui_page == UI_PAGE_LFO &&
                        (event.args_keyboard.ascii == '\r' ||
                         event.args_keyboard.ascii == '\n')) {
-                s_lfos[s_lfo_selected].enabled =
-                    !s_lfos[s_lfo_selected].enabled;
-                s_lfos[s_lfo_selected].last_value = -1;
-                s_ui_dirty = true;
-            } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
-                       s_ui_page == UI_PAGE_LFO &&
-                       event.args_keyboard.ascii >= '1' &&
-                       event.args_keyboard.ascii <= '4') {
-                s_lfo_selected = event.args_keyboard.ascii - '1';
+                s_lfo.enabled = !s_lfo.enabled;
+                s_lfo.last_value = -1;
                 s_ui_dirty = true;
             } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
                        s_ui_page == UI_PAGE_LOOPER &&
@@ -777,6 +816,7 @@ void app_main(void) {
             }
         }
         if (s_ui_page == UI_PAGE_LOOPER) render_transport_fast();
+        else if (s_ui_page == UI_PAGE_LFO) render_lfo_fast();
         if (memcmp(&current, &previous, sizeof(current)) != 0 ||
             diagnostic_revision != previous_diagnostic_revision || loop_changed ||
             s_ui_dirty) {
