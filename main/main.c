@@ -69,31 +69,9 @@ static int16_t s_previous_track_cursor[2][4] = {
 static uint16_t s_previous_beat[2] = {UINT16_MAX, UINT16_MAX};
 typedef enum {
     UI_PAGE_LOOPER,
-    UI_PAGE_MIDI,
     UI_PAGE_LFO,
 } ui_page_t;
-typedef enum {
-    MIDI_FADER,
-    MIDI_GAIN,
-    MIDI_PAN,
-    MIDI_EQ_HIGH,
-    MIDI_EQ_MID,
-    MIDI_EQ_LOW,
-    MIDI_COMPRESSION,
-    MIDI_SATURATION,
-    MIDI_FX_AMOUNT,
-    MIDI_FX_TYPE,
-    MIDI_FX_PARAM,
-    MIDI_CUE,
-    MIDI_PARAMETER_COUNT,
-} midi_parameter_t;
 static ui_page_t s_ui_page;
-static uint8_t s_midi_channel;
-static uint8_t s_midi_parameter;
-static uint8_t s_midi_values[2][MIDI_PARAMETER_COUNT] = {
-    {100, 100, 64, 64, 64, 64, 0, 0, 0, 1, 64, 0},
-    {100, 100, 64, 64, 64, 64, 0, 0, 0, 1, 64, 0},
-};
 static bool s_ui_dirty;
 typedef enum {
     LFO_FIELD_ENABLED,
@@ -117,24 +95,23 @@ typedef struct {
     int16_t last_value;
 } midi_lfo_t;
 #define LFO_COUNT 4
-#define LFO_TARGET_COUNT 10
+#define LFO_TARGET_COUNT 3
 #define LFO_SHAPE_COUNT 6
 #define LFO_RATE_COUNT 13
 static midi_lfo_t s_lfos[LFO_COUNT] = {
-    {.channel = 0, .target = 8, .shape = 0, .rate = 9, .depth = 64, .center = 64, .last_value = -1},
-    {.channel = 0, .target = 2, .shape = 1, .rate = 10, .depth = 48, .center = 64, .last_value = -1},
-    {.channel = 1, .target = 3, .shape = 0, .rate = 11, .depth = 40, .center = 64, .last_value = -1},
-    {.channel = 1, .target = 9, .shape = 4, .rate = 8, .depth = 96, .center = 64, .last_value = -1},
+    {.channel = 0, .target = 0, .shape = 0, .rate = 9, .depth = 64, .center = 96, .last_value = -1},
+    {.channel = 0, .target = 1, .shape = 1, .rate = 10, .depth = 64, .center = 64, .last_value = -1},
+    {.channel = 1, .target = 0, .shape = 0, .rate = 11, .depth = 48, .center = 96, .last_value = -1},
+    {.channel = 1, .target = 2, .shape = 4, .rate = 8, .depth = 96, .center = 64, .last_value = -1},
 };
 static uint8_t s_lfo_selected;
 static uint8_t s_lfo_field;
 static int64_t s_lfo_previous_tick_us;
 static const char *const s_lfo_target_names[LFO_TARGET_COUNT] = {
-    "FADER", "GAIN", "PAN", "EQ HIGH", "EQ MID", "EQ LOW",
-    "COMPRESSION", "SATURATION", "FX AMOUNT", "FX PARAM"
+    "VOLUME", "EFFECT AMOUNT", "EFFECT MOVEMENT"
 };
 static const uint8_t s_lfo_target_cc[LFO_TARGET_COUNT] = {
-    7, 20, 10, 22, 23, 24, 12, 13, 1, 0
+    7, 1, 0
 };
 static const char *const s_lfo_shape_names[LFO_SHAPE_COUNT] = {
     "SINE", "TRIANGLE", "SAW UP", "SAW DOWN", "SQUARE", "RANDOM"
@@ -143,50 +120,8 @@ static const char *const s_lfo_rate_names[LFO_RATE_COUNT] = {
     "0.10 Hz", "0.25 Hz", "0.50 Hz", "1.00 Hz", "2.00 Hz", "4.00 Hz", "8.00 Hz",
     "1/16", "1/8", "1/4", "1/2", "1 BAR", "2 BAR"
 };
-static const char *const s_midi_parameter_names[MIDI_PARAMETER_COUNT] = {
-    "FADER", "GAIN", "PAN", "EQ HIGH", "EQ MID", "EQ LOW",
-    "COMPRESSION", "SATURATION", "FX AMOUNT", "FX TYPE",
-    "FX PARAM", "CUE"
-};
-static const uint8_t s_midi_parameter_cc[MIDI_PARAMETER_COUNT] = {
-    7, 20, 10, 22, 23, 24, 12, 13, 1, 0, 0, 3
-};
-
 static void text(float x, float y, float size, pax_col_t color, const char *value) {
     pax_draw_text(&s_framebuffer, color, pax_font_sky_mono, size, x, y, value);
-}
-
-static void midi_send_selected(void) {
-    uint8_t value = s_midi_values[s_midi_channel][s_midi_parameter];
-    uint8_t channel = s_midi_channel + 1;
-    if (s_midi_parameter == MIDI_FX_TYPE) {
-        uar_midi_program_change(channel, value);
-    } else if (s_midi_parameter == MIDI_FX_PARAM) {
-        int16_t bend = (int16_t)((int)value * 129 - 8192);
-        uar_midi_pitch_bend(channel, bend);
-    } else {
-        uar_midi_control_change(
-            channel, s_midi_parameter_cc[s_midi_parameter], value
-        );
-    }
-}
-
-static void midi_adjust_selected(int delta) {
-    int value = s_midi_values[s_midi_channel][s_midi_parameter];
-    if (s_midi_parameter == MIDI_CUE) {
-        value = value ? 0 : 127;
-    } else if (s_midi_parameter == MIDI_FX_TYPE) {
-        value += delta > 0 ? 1 : -1;
-        if (value < 1) value = 1;
-        if (value > 6) value = 6;
-    } else {
-        value += delta;
-        if (value < 0) value = 0;
-        if (value > 127) value = 127;
-    }
-    s_midi_values[s_midi_channel][s_midi_parameter] = value;
-    midi_send_selected();
-    s_ui_dirty = true;
 }
 
 static float lfo_frequency(uint8_t rate) {
@@ -239,7 +174,7 @@ static void lfo_tick(void) {
         if (value == lfo->last_value) continue;
         lfo->last_value = value;
         uint8_t channel = lfo->channel + 1;
-        if (lfo->target == 9) {
+        if (lfo->target == 2) {
             uar_midi_pitch_bend(channel, (int16_t)(value * 129 - 8192));
         } else {
             uar_midi_control_change(
@@ -293,45 +228,6 @@ static void lfo_adjust_selected(int direction) {
     s_ui_dirty = true;
 }
 
-static void render_midi_panel(void) {
-    pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 103, s_width - 40, 302, 5);
-    pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, 103, 8, 302);
-    text(42, 115, 14, COLOR_ACCENT, "USB MIDI MIXER");
-    text(42, 137, 24, COLOR_TEXT,
-         s_midi_channel == 0 ? "CHANNEL 1" : "CHANNEL 2");
-    text(248, 139, 14, uar_midi_is_connected() ? COLOR_GOOD : COLOR_BAD,
-         uar_midi_is_connected() ? "● MIDI ONLINE" : "○ MIDI OFFLINE");
-
-    for (uint8_t parameter = 0; parameter < MIDI_PARAMETER_COUNT; parameter++) {
-        uint8_t column = parameter / 6;
-        uint8_t row = parameter % 6;
-        float x = 42 + column * 375;
-        float y = 177 + row * 35;
-        bool selected = parameter == s_midi_parameter;
-        uint8_t value = s_midi_values[s_midi_channel][parameter];
-        if (selected) {
-            pax_draw_rect(&s_framebuffer, COLOR_ACCENT, x - 8, y - 4, 350, 29);
-        }
-        text(x, y, 14, selected ? COLOR_TEXT : COLOR_DIM,
-             s_midi_parameter_names[parameter]);
-        char value_text[20];
-        if (parameter == MIDI_CUE) {
-            snprintf(value_text, sizeof(value_text), "%s", value ? "ON" : "OFF");
-        } else if (parameter == MIDI_FX_TYPE) {
-            static const char *const fx_names[] = {
-                "", "FILTER", "DELAY", "TAPE", "LOOP", "TREMOLO", "SIREN"
-            };
-            snprintf(value_text, sizeof(value_text), "%s", fx_names[value]);
-        } else {
-            snprintf(value_text, sizeof(value_text), "%3u", value);
-            pax_draw_rect(&s_framebuffer, 0xff3b3c3c, x + 135, y + 4, 145, 9);
-            pax_draw_rect(&s_framebuffer, selected ? COLOR_TEXT : COLOR_GOOD,
-                          x + 135, y + 4, 145.0f * value / 127.0f, 9);
-        }
-        text(x + 292, y, 14, selected ? COLOR_TEXT : COLOR_DIM, value_text);
-    }
-}
-
 static void render_lfo_panel(void) {
     pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 103, s_width - 40, 302, 5);
     pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, 103, 8, 302);
@@ -345,8 +241,11 @@ static void render_lfo_panel(void) {
         snprintf(label, sizeof(label), "LFO %u  %s", slot + 1,
                  s_lfos[slot].enabled ? "ON" : "OFF");
         text(x + 10, 155, 16, COLOR_TEXT, label);
-        text(x + 10, 176, 11, selected ? COLOR_TEXT : COLOR_DIM,
-             s_lfo_target_names[s_lfos[slot].target]);
+        char destination[36];
+        snprintf(destination, sizeof(destination), "%s · CH %u",
+                 s_lfo_target_names[s_lfos[slot].target],
+                 s_lfos[slot].channel + 1);
+        text(x + 10, 176, 11, selected ? COLOR_TEXT : COLOR_DIM, destination);
     }
 
     midi_lfo_t *lfo = &s_lfos[s_lfo_selected];
@@ -367,7 +266,8 @@ static void render_lfo_panel(void) {
                 snprintf(value, sizeof(value), "CH %u", lfo->channel + 1);
                 break;
             case LFO_FIELD_TARGET:
-                snprintf(value, sizeof(value), "%s", s_lfo_target_names[lfo->target]);
+                snprintf(value, sizeof(value), "%s · CHANNEL %u",
+                         s_lfo_target_names[lfo->target], lfo->channel + 1);
                 break;
             case LFO_FIELD_SHAPE:
                 snprintf(value, sizeof(value), "%s", s_lfo_shape_names[lfo->shape]);
@@ -493,8 +393,6 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         pax_draw_round_rect(&s_framebuffer, COLOR_PANEL, 20, 105, s_width - 40, 250, 5);
         text(150, 190, 28, COLOR_ACCENT, "CONNECT EP-136 TO START");
         text(218, 238, 16, COLOR_TEXT, "USB AUDIO  //  48 kHz");
-    } else if (s_ui_page == UI_PAGE_MIDI) {
-        render_midi_panel();
     } else if (s_ui_page == UI_PAGE_LFO) {
         render_lfo_panel();
     } else {
@@ -586,13 +484,7 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
     }
 
     pax_draw_rect(&s_framebuffer, COLOR_DARK, 0, s_height - 55, s_width, 55);
-    if (s_ui_page == UI_PAGE_MIDI) {
-        pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, s_height - 55, 110, 55);
-        text(34, s_height - 42, 15, COLOR_TEXT, "MIDI");
-        text(34, s_height - 23, 12, COLOR_TEXT, "TAB: LFO");
-        text(148, s_height - 38, 13, COLOR_TEXT,
-             "↑↓ PARAM   ←→ VALUE   1/2 CHANNEL   ENTER TOGGLE   F1 EXIT");
-    } else if (s_ui_page == UI_PAGE_LFO) {
+    if (s_ui_page == UI_PAGE_LFO) {
         pax_draw_rect(&s_framebuffer, COLOR_ACCENT, 20, s_height - 55, 110, 55);
         text(34, s_height - 42, 15, COLOR_TEXT, "MIDI LFO");
         text(34, s_height - 23, 12, COLOR_TEXT, "TAB: LOOPER");
@@ -603,7 +495,7 @@ static void render(const uar_probe_snapshot_t *probe, char diagnostics[][72]) {
         text(34, s_height - 42, 15, COLOR_TEXT, "F2 REC");
         text(34, s_height - 23, 12, COLOR_TEXT, "/ OVERDUB");
         text(132, s_height - 38, 13, COLOR_TEXT,
-            "↑↓ LOOP VOL   B+↑↓ BPM   ←→ BARS   1-4 TRACK   TAB MIDI   F1 EXIT");
+            "↑↓ LOOP VOL   B+↑↓ BPM   ←→ BARS   1-4 TRACK   TAB LFO   F1 EXIT");
     }
     s_ui_draw_ms = (uint32_t)((esp_timer_get_time() - draw_started + 500) / 1000);
     int64_t present_started = esp_timer_get_time();
@@ -726,39 +618,6 @@ void app_main(void) {
                     }
                     continue;
                 }
-                if (s_ui_page == UI_PAGE_MIDI) {
-                    switch (event.args_navigation.key) {
-                        case BSP_INPUT_NAVIGATION_KEY_F1:
-                            bsp_device_restart_to_launcher();
-                            break;
-                        case BSP_INPUT_NAVIGATION_KEY_UP:
-                            s_midi_parameter =
-                                (s_midi_parameter + MIDI_PARAMETER_COUNT - 1) %
-                                MIDI_PARAMETER_COUNT;
-                            s_ui_dirty = true;
-                            break;
-                        case BSP_INPUT_NAVIGATION_KEY_DOWN:
-                            s_midi_parameter =
-                                (s_midi_parameter + 1) % MIDI_PARAMETER_COUNT;
-                            s_ui_dirty = true;
-                            break;
-                        case BSP_INPUT_NAVIGATION_KEY_LEFT:
-                            midi_adjust_selected(-4);
-                            break;
-                        case BSP_INPUT_NAVIGATION_KEY_RIGHT:
-                            midi_adjust_selected(4);
-                            break;
-                        case BSP_INPUT_NAVIGATION_KEY_VOLUME_UP:
-                            uar_monitor_adjust_volume(5);
-                            break;
-                        case BSP_INPUT_NAVIGATION_KEY_VOLUME_DOWN:
-                            uar_monitor_adjust_volume(-5);
-                            break;
-                        default:
-                            break;
-                    }
-                    continue;
-                }
                 switch (event.args_navigation.key) {
                     case BSP_INPUT_NAVIGATION_KEY_F1:
                         bsp_device_restart_to_launcher();
@@ -806,7 +665,7 @@ void app_main(void) {
                 }
             } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
                        event.args_keyboard.ascii == '\t') {
-                s_ui_page = (ui_page_t)((s_ui_page + 1) % 3);
+                s_ui_page = (ui_page_t)((s_ui_page + 1) % 2);
                 s_ui_dirty = true;
             } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
                        s_ui_page == UI_PAGE_LFO &&
@@ -821,17 +680,6 @@ void app_main(void) {
                        event.args_keyboard.ascii >= '1' &&
                        event.args_keyboard.ascii <= '4') {
                 s_lfo_selected = event.args_keyboard.ascii - '1';
-                s_ui_dirty = true;
-            } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
-                       s_ui_page == UI_PAGE_MIDI &&
-                       (event.args_keyboard.ascii == '\r' ||
-                        event.args_keyboard.ascii == '\n')) {
-                midi_adjust_selected(1);
-            } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
-                       s_ui_page == UI_PAGE_MIDI &&
-                       (event.args_keyboard.ascii == '1' ||
-                        event.args_keyboard.ascii == '2')) {
-                s_midi_channel = event.args_keyboard.ascii - '1';
                 s_ui_dirty = true;
             } else if (event.type == INPUT_EVENT_TYPE_KEYBOARD &&
                        s_ui_page == UI_PAGE_LOOPER &&
